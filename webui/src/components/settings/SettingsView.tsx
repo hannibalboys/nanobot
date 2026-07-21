@@ -34,6 +34,7 @@ import {
   HardDrive,
   Hexagon,
   ImageIcon,
+  Laptop,
   Layers,
   Loader2,
   LogOut,
@@ -63,6 +64,7 @@ import { useTranslation } from "react-i18next";
 
 import { channelUiPresentation } from "@/channel-plugins/registry";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { ConnectorDevicesSettings } from "@/components/settings/ConnectorDevicesSettings";
 import { SkillsCatalogSettings } from "@/components/settings/SkillsCatalogSettings";
 import { TokenUsageHeatmap } from "@/components/settings/TokenUsageHeatmap";
 import { ToggleButton } from "@/components/settings/ToggleButton";
@@ -143,6 +145,7 @@ import { notifyMcpPresetsChanged } from "@/lib/mcp-preset-events";
 import { fmtDateTime, relativeTime } from "@/lib/format";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import type { ColorTheme } from "@/hooks/useTheme";
 import {
   logoFallbackUrls,
   providerBrand,
@@ -183,6 +186,7 @@ export type SettingsSectionKey =
   | "apps"
   | "automations"
   | "skills"
+  | "devices"
   | "runtime"
   | "advanced";
 
@@ -314,10 +318,12 @@ const DEFAULT_CUSTOM_MCP_FORM: CustomMcpForm = {
 
 interface SettingsViewProps {
   theme: "light" | "dark";
+  colorTheme?: ColorTheme;
   initialSection?: SettingsSectionKey;
   initialSettings?: SettingsPayload | null;
   showSidebar?: boolean;
   onToggleTheme: () => void;
+  onChangeColorTheme?: (colorTheme: ColorTheme) => void;
   onBackToChat: () => void;
   onModelNameChange: (modelName: string | null) => void;
   onSettingsChange?: (payload: SettingsPayload) => void;
@@ -519,10 +525,12 @@ function pendingRestartSectionsFromPayload(payload: SettingsPayload): PendingRes
 
 export function SettingsView({
   theme,
+  colorTheme = "default",
   initialSection = "overview",
   initialSettings = null,
   showSidebar = true,
   onToggleTheme,
+  onChangeColorTheme,
   onBackToChat,
   onModelNameChange,
   onSettingsChange,
@@ -621,6 +629,13 @@ export function SettingsView({
   useEffect(() => {
     setActiveSection(initialSection);
   }, [initialSection]);
+
+  useEffect(() => {
+    if (activeSection === "devices" && settings && !settings.connector?.enabled) {
+      setActiveSection("overview");
+      onSectionChange?.("overview");
+    }
+  }, [activeSection, onSectionChange, settings]);
 
   const selectSection = useCallback(
     (section: SettingsSectionKey) => {
@@ -1643,7 +1658,9 @@ export function SettingsView({
         return (
           <AppearanceSettings
             theme={theme}
+            colorTheme={colorTheme}
             onToggleTheme={onToggleTheme}
+            onChangeColorTheme={onChangeColorTheme}
             localPrefs={localPrefs}
             onChangeLocalPrefs={setLocalPrefs}
           />
@@ -1852,6 +1869,8 @@ export function SettingsView({
         );
       case "skills":
         return <SkillsCatalogSettings skills={skills} />;
+      case "devices":
+        return <ConnectorDevicesSettings allowExec={settings?.connector?.allowExec ?? false} />;
       case "runtime":
         return (
           <RuntimeSettings
@@ -1907,6 +1926,7 @@ export function SettingsView({
       {showSidebar ? (
         <SettingsSidebar
           activeSection={activeSection}
+          navItems={visibleSettingsNavItems(settings)}
           onSelectSection={selectSection}
           onBackToChat={onBackToChat}
           onLogout={onLogout}
@@ -2028,9 +2048,19 @@ const SETTINGS_NAV_ITEMS: Array<{ key: SettingsSectionKey; icon: LucideIcon; fal
   { key: "voice", icon: Mic, fallback: "Voice" },
   { key: "browser", icon: Globe2, fallback: "Web" },
   { key: "channels", icon: MessageCircle, fallback: "Channels" },
+  { key: "devices", icon: Laptop, fallback: "Devices" },
   { key: "runtime", icon: Server, fallback: "System" },
   { key: "advanced", icon: ShieldCheck, fallback: "Security" },
 ];
+
+function visibleSettingsNavItems(
+  settings: SettingsPayload | null,
+): Array<{ key: SettingsSectionKey; icon: LucideIcon; fallback: string }> {
+  if (settings?.connector?.enabled) {
+    return SETTINGS_NAV_ITEMS;
+  }
+  return SETTINGS_NAV_ITEMS.filter((item) => item.key !== "devices");
+}
 
 function visibleWebuiDefaultAccessMode(mode: string | null | undefined): WebuiDefaultAccessMode {
   return mode === "full" ? "full" : "default";
@@ -2042,12 +2072,14 @@ function titleForSection(section: SettingsSectionKey): string {
 
 function SettingsSidebar({
   activeSection,
+  navItems,
   onSelectSection,
   onBackToChat,
   onLogout,
   hostChromeInset,
 }: {
   activeSection: SettingsSectionKey;
+  navItems: Array<{ key: SettingsSectionKey; icon: LucideIcon; fallback: string }>;
   onSelectSection: (section: SettingsSectionKey) => void;
   onBackToChat: () => void;
   onLogout?: () => void;
@@ -2079,7 +2111,7 @@ function SettingsSidebar({
         aria-label={t("settings.sidebar.ariaLabel")}
         className="-mx-1 flex snap-x gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:mx-0 lg:block lg:space-y-1 lg:overflow-visible lg:px-0 lg:pb-0"
       >
-        {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
+        {navItems.map(({ key, icon: Icon, fallback }) => {
           const active = key === activeSection;
           return (
             <button
@@ -2378,12 +2410,16 @@ function VersionCheckRow({ currentVersion }: { currentVersion?: string }) {
 
 function AppearanceSettings({
   theme,
+  colorTheme,
   onToggleTheme,
+  onChangeColorTheme,
   localPrefs,
   onChangeLocalPrefs,
 }: {
   theme: "light" | "dark";
+  colorTheme: ColorTheme;
   onToggleTheme: () => void;
+  onChangeColorTheme?: (colorTheme: ColorTheme) => void;
   localPrefs: LocalPreferences;
   onChangeLocalPrefs: Dispatch<SetStateAction<LocalPreferences>>;
 }) {
@@ -2395,8 +2431,8 @@ function AppearanceSettings({
         <SettingsSectionTitle>{t("settings.sections.interface")}</SettingsSectionTitle>
         <SettingsGroup>
           <SettingsRow
-            title={t("settings.rows.theme")}
-            description={t("settings.help.theme")}
+            title={tx("settings.rows.appearance", "Appearance")}
+            description={tx("settings.help.appearance", "Switch between light and dark appearance.")}
           >
             <button
               type="button"
@@ -2420,6 +2456,20 @@ function AppearanceSettings({
                 {t("settings.values.dark")}
               </span>
             </button>
+          </SettingsRow>
+
+          <SettingsRow
+            title={t("settings.rows.theme")}
+            description={t("settings.help.theme")}
+          >
+            <SegmentedControl
+              value={colorTheme}
+              options={[
+                { value: "default", label: tx("settings.values.themeDefault", "Default") },
+                { value: "forest", label: tx("settings.values.themeForest", "Forest") },
+              ]}
+              onChange={(value) => onChangeColorTheme?.(value as ColorTheme)}
+            />
           </SettingsRow>
 
           <SettingsRow

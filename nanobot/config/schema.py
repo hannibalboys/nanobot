@@ -331,6 +331,74 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class ConnectorConfig(Base):
+    """nanobot Connector (local file connector) configuration.
+
+    Disabled by default: when ``enabled`` is false the ``/connector/ws`` data
+    endpoint and every ``/api/connector/*`` management route return 404, and the
+    ``connector_*`` agent tools are not registered — zero impact on existing
+    deployments.
+    """
+
+    enabled: bool = False
+    path: str = "/connector/ws"  # WS upgrade path on the gateway
+    pairing_code_ttl_s: int = Field(default=600, ge=30, le=86_400)
+    rpc_timeout_s: int = Field(default=60, ge=1, le=600)  # non-transfer RPC
+    transfer_timeout_s: int = Field(default=600, ge=1, le=7_200)  # fs.fetch total
+    max_file_bytes: int = Field(default=209_715_200, ge=1, le=5_368_709_120)  # 200MB
+    max_inline_read_bytes: int = Field(default=262_144, ge=1, le=10_485_760)  # 256KB
+    max_concurrent_transfers: int = Field(default=2, ge=1, le=32)
+    chunk_bytes: int = Field(default=262_144, ge=1024, le=8_388_608)  # 256KB
+    fetch_cache_max_bytes: int = Field(default=2_147_483_648, ge=1, le=53_687_091_200)  # 2GB
+    # Controlled local execution (add-connector-local-tools). Off by default: when
+    # false the connector_list_tools / connector_call_tool agent tools are not
+    # registered and the gateway refuses tools.* — file access is unaffected.
+    allow_exec: bool = False
+    max_concurrent_execs: int = Field(default=2, ge=1, le=32)  # per-device
+    exec_timeout_s: int = Field(default=300, ge=1, le=3_600)  # single call
+    max_exec_output_bytes: int = Field(default=1_048_576, ge=1024, le=67_108_864)  # 1MB
+    approval_ttl_s: int = Field(default=120, ge=5, le=3_600)  # default-deny on expiry
+    exec_rate_per_minute: int = Field(default=30, ge=1, le=600)  # per session & per device
+    # Local MCP proxy (add-connector-mcp-proxy). Bridges a device's locally-run
+    # MCP servers; requires allow_exec too (it is an execution-class capability).
+    allow_mcp_proxy: bool = False
+    # Desktop control (add-connector-desktop-control). Screen capture + input
+    # injection under a human-in-the-loop session. Independent of allow_exec;
+    # highest-risk capability, off by default.
+    allow_desktop_control: bool = False
+    desktop_max_fps: int = Field(default=2, ge=1, le=30)
+    desktop_max_dimension: int = Field(default=1280, ge=320, le=7680)  # capture long-edge cap
+    desktop_session_max_s: int = Field(default=900, ge=30, le=14_400)  # hard session cap
+    desktop_idle_timeout_s: int = Field(default=120, ge=10, le=3_600)  # no-activity auto-end
+    desktop_recording_retention_days: int = Field(default=7, ge=1, le=365)
+    download_version: str = Field(
+        default="0.1.0",
+        description="Connector client release version (GitHub tag connector-v{version}).",
+        validation_alias=AliasChoices("downloadVersion", "download_version"),
+        serialization_alias="downloadVersion",
+    )
+    download_base_url: str | None = Field(
+        default=None,
+        description="Optional base URL for mirrored connector installers (per-platform filenames appended).",
+        validation_alias=AliasChoices("downloadBaseUrl", "download_base_url"),
+        serialization_alias="downloadBaseUrl",
+    )
+    releases_url: str | None = Field(
+        default=None,
+        description="Optional override for the connector releases index page shown in WebUI.",
+        validation_alias=AliasChoices("releasesUrl", "releases_url"),
+        serialization_alias="releasesUrl",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def path_must_start_with_slash(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith("/"):
+            raise ValueError('connector.path must start with "/"')
+        return value
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
@@ -398,6 +466,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    connector: ConnectorConfig = Field(default_factory=ConnectorConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,

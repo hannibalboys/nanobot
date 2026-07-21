@@ -933,6 +933,11 @@ def settings_payload(
             "unified_session": defaults.unified_session,
         },
         "usage": token_usage_payload(timezone_name=defaults.timezone),
+        "connector": {
+            "enabled": config.connector.enabled,
+            "allowExec": config.connector.allow_exec,
+            "allowDesktopControl": config.connector.allow_desktop_control,
+        },
         "advanced": {
             "restrict_to_workspace": config.tools.restrict_to_workspace,
             "workspace_sandbox": sandbox_status.as_dict(),

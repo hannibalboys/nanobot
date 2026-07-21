@@ -7,6 +7,20 @@ import type {
   ChannelValidationPayload,
   ChatSummary,
   CliAppsPayload,
+  ConnectorAccessRequest,
+  ConnectorApproval,
+  ConnectorDownloadsPayload,
+  ConnectorExecAuditRecord,
+  ConnectorExecMetrics,
+  ConnectorDesktopAuditRecord,
+  ConnectorDesktopRecording,
+  ConnectorDesktopSession,
+  ConnectorGrant,
+  ConnectorGrantsPayload,
+  ConnectorMcpToolsPayload,
+  ConnectorNodesPayload,
+  ConnectorPairingCodePayload,
+  ConnectorToolsPayload,
   FilePreviewPayload,
   ImageGenerationSettingsUpdate,
   McpPresetsPayload,
@@ -296,6 +310,250 @@ export async function fetchSkillDetail(
 ): Promise<SkillDetail> {
   return request<SkillDetail>(
     `${base}/api/webui/skills/${encodeURIComponent(name)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorNodes(
+  token: string,
+  base: string = "",
+): Promise<ConnectorNodesPayload> {
+  return request<ConnectorNodesPayload>(
+    `${base}/api/connector/nodes`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function createConnectorPairingCode(
+  token: string,
+  base: string = "",
+): Promise<ConnectorPairingCodePayload> {
+  return request<ConnectorPairingCodePayload>(
+    `${base}/api/connector/pairing-codes`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorDownloads(
+  token: string,
+  base: string = "",
+): Promise<ConnectorDownloadsPayload> {
+  return request<ConnectorDownloadsPayload>(
+    `${base}/api/connector/downloads`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function revokeConnectorNode(
+  token: string,
+  nodeId: string,
+  base: string = "",
+): Promise<{ revoked: string }> {
+  return request<{ revoked: string }>(
+    `${base}/api/connector/revoke?nodeId=${encodeURIComponent(nodeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+// --- v2 controlled execution (add-connector-local-tools) -----------------
+
+export async function setConnectorAlias(
+  token: string,
+  nodeId: string,
+  alias: string,
+  base: string = "",
+): Promise<{ nodeId: string; alias: string }> {
+  return request(
+    `${base}/api/connector/alias?nodeId=${encodeURIComponent(nodeId)}&alias=${encodeURIComponent(alias)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorTools(
+  token: string,
+  nodeId: string,
+  base: string = "",
+): Promise<ConnectorToolsPayload> {
+  return request<ConnectorToolsPayload>(
+    `${base}/api/connector/tools?nodeId=${encodeURIComponent(nodeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorGrants(
+  token: string,
+  nodeId: string,
+  base: string = "",
+): Promise<ConnectorGrantsPayload> {
+  return request<ConnectorGrantsPayload>(
+    `${base}/api/connector/grants?nodeId=${encodeURIComponent(nodeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function grantConnectorTool(
+  token: string,
+  params: { nodeId: string; tool: string; operatorId: string; ttlS?: number },
+  base: string = "",
+): Promise<{ granted: ConnectorGrant }> {
+  const qs = new URLSearchParams({
+    nodeId: params.nodeId,
+    tool: params.tool,
+    operatorId: params.operatorId,
+  });
+  if (params.ttlS) qs.set("ttlS", String(params.ttlS));
+  return request(`${base}/api/connector/grant?${qs.toString()}`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function revokeConnectorGrant(
+  token: string,
+  params: { nodeId: string; tool: string; operatorId: string },
+  base: string = "",
+): Promise<{ revoked: unknown }> {
+  const qs = new URLSearchParams(params as Record<string, string>);
+  return request(
+    `${base}/api/connector/revoke-grant?${qs.toString()}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorRequests(
+  token: string,
+  base: string = "",
+): Promise<{ requests: ConnectorAccessRequest[] }> {
+  return request(`${base}/api/connector/requests`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function denyConnectorRequest(
+  token: string,
+  params: { nodeId: string; operatorId: string },
+  base: string = "",
+): Promise<{ denied: unknown }> {
+  const qs = new URLSearchParams(params as Record<string, string>);
+  return request(
+    `${base}/api/connector/deny-request?${qs.toString()}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorApprovals(
+  token: string,
+  base: string = "",
+): Promise<{ approvals: ConnectorApproval[] }> {
+  return request(`${base}/api/connector/approvals`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function resolveConnectorApproval(
+  token: string,
+  approvalId: string,
+  decision: "approve" | "deny",
+  base: string = "",
+): Promise<{ approvalId: string; approved: boolean }> {
+  return request(
+    `${base}/api/connector/approve?approvalId=${encodeURIComponent(approvalId)}&decision=${decision}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorExecAudit(
+  token: string,
+  nodeId?: string,
+  base: string = "",
+): Promise<{ records: ConnectorExecAuditRecord[] }> {
+  const qs = nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : "";
+  return request(`${base}/api/connector/exec-audit${qs}`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function fetchConnectorExecMetrics(
+  token: string,
+  base: string = "",
+): Promise<ConnectorExecMetrics> {
+  return request<ConnectorExecMetrics>(
+    `${base}/api/connector/exec-metrics`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorMcpTools(
+  token: string,
+  nodeId: string,
+  base: string = "",
+): Promise<ConnectorMcpToolsPayload> {
+  return request<ConnectorMcpToolsPayload>(
+    `${base}/api/connector/mcp-tools?nodeId=${encodeURIComponent(nodeId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorDesktopSessions(
+  token: string,
+  base: string = "",
+): Promise<{ sessions: ConnectorDesktopSession[] }> {
+  return request(`${base}/api/connector/desktop-sessions`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function takeOverConnectorDesktop(
+  token: string,
+  sessionId: string,
+  base: string = "",
+): Promise<{ takenOver: string }> {
+  return request(
+    `${base}/api/connector/desktop-takeover?sessionId=${encodeURIComponent(sessionId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+export async function fetchConnectorDesktopAudit(
+  token: string,
+  sessionId?: string,
+  base: string = "",
+): Promise<{ records: ConnectorDesktopAuditRecord[] }> {
+  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  return request(`${base}/api/connector/desktop-audit${qs}`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function fetchConnectorDesktopRecordings(
+  token: string,
+  base: string = "",
+): Promise<{ recordings: ConnectorDesktopRecording[] }> {
+  return request(`${base}/api/connector/desktop-recordings`, token, undefined, API_READ_TIMEOUT_MS);
+}
+
+export async function deleteConnectorDesktopRecording(
+  token: string,
+  sessionId: string,
+  base: string = "",
+): Promise<{ deleted: string }> {
+  return request(
+    `${base}/api/connector/desktop-recording-delete?sessionId=${encodeURIComponent(sessionId)}`,
     token,
     undefined,
     API_READ_TIMEOUT_MS,

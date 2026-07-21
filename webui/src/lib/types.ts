@@ -514,6 +514,11 @@ export interface SettingsPayload {
     };
     unified_session: boolean;
   };
+  connector?: {
+    enabled: boolean;
+    allowExec?: boolean;
+    allowDesktopControl?: boolean;
+  };
   usage?: {
     days: Array<{
       date: string;
@@ -1156,6 +1161,176 @@ export interface FilePreviewPayload {
   content: string;
   size: number;
   truncated: boolean;
+}
+
+export interface ConnectorNode {
+  nodeId: string;
+  name: string;
+  alias?: string;
+  platform: string;
+  ownerId?: string;
+  createdAt?: string;
+  lastSeenAt?: string | null;
+  revoked?: boolean;
+  online: boolean;
+  roots?: string[];
+  capabilities?: string[];
+}
+
+export interface ConnectorToolParam {
+  name: string;
+  type: string;
+  required?: boolean;
+  description?: string;
+  choices?: string[];
+  sensitive?: boolean;
+}
+
+export interface ConnectorToolSchema {
+  name: string;
+  description?: string;
+  approval: "auto" | "webui" | "local";
+  params: ConnectorToolParam[];
+  envVars?: string[];
+  secretVars?: string[];
+}
+
+export interface ConnectorToolsPayload {
+  nodeId: string;
+  tools: ConnectorToolSchema[];
+}
+
+export interface ConnectorGrant {
+  nodeId: string;
+  tool: string;
+  operatorId: string;
+  grantedBy?: string;
+  createdAt?: string;
+  expiresAt?: number | null;
+}
+
+export interface ConnectorActiveOperator {
+  operatorId: string;
+  tools: string[];
+}
+
+export interface ConnectorGrantsPayload {
+  grants: ConnectorGrant[];
+  activeOperators: ConnectorActiveOperator[];
+}
+
+export interface ConnectorAccessRequest {
+  nodeId: string;
+  operatorId: string;
+  tools: string[];
+  reason?: string;
+  requestedAt?: string;
+}
+
+export interface ConnectorApproval {
+  approvalId: string;
+  nodeId: string;
+  tool: string;
+  operatorId: string;
+  args: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface ConnectorExecAuditRecord {
+  ts: string;
+  operatorId: string;
+  nodeId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  approval: string;
+  result: string;
+  exitCode?: number | null;
+  durationMs?: number;
+}
+
+export interface ConnectorMcpTool {
+  server: string;
+  name: string;
+  description?: string;
+  approval: "auto" | "webui" | "local";
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface ConnectorMcpServerHealth {
+  server: string;
+  healthy: boolean;
+  toolCount: number;
+  error?: string | null;
+}
+
+export interface ConnectorMcpToolsPayload {
+  nodeId: string;
+  tools: ConnectorMcpTool[];
+  servers: ConnectorMcpServerHealth[];
+}
+
+export interface ConnectorDesktopSession {
+  sessionId: string;
+  nodeId: string;
+  operatorId: string;
+  goal: string;
+  recording: boolean;
+  ageS: number;
+}
+
+export interface ConnectorDesktopAuditRecord {
+  ts: string;
+  sessionId: string;
+  nodeId: string;
+  operatorId: string;
+  action: string;
+  params: Record<string, unknown>;
+  sensitive: boolean;
+  confirmed: boolean;
+  result: string;
+  frameRef?: string;
+}
+
+export interface ConnectorDesktopRecording {
+  sessionId: string;
+  nodeId: string;
+  frames: number;
+  mtime: number;
+}
+
+export interface ConnectorExecMetrics {
+  executions: number;
+  failures: number;
+  failureRate: number;
+  approvalDenied: number;
+  rateLimited: number;
+  durationMsP50: number;
+  durationMsP95: number;
+  byNode: Record<string, number>;
+}
+
+export interface ConnectorNodesPayload {
+  nodes: ConnectorNode[];
+}
+
+export interface ConnectorPairingCodePayload {
+  code: string;
+  expiresAt: number;
+}
+
+export interface ConnectorDownloadPlatform {
+  id: string;
+  label: string;
+  filename: string;
+  url: string;
+}
+
+export interface ConnectorDownloadsPayload {
+  version: string;
+  tag: string;
+  releasesUrl: string;
+  sourceInstall: string;
+  platforms: ConnectorDownloadPlatform[];
 }
 
 export type Outbound =

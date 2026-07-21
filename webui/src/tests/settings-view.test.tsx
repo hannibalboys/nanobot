@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SettingsView } from "@/components/settings/SettingsView";
+import { SettingsView, type SettingsSectionKey } from "@/components/settings/SettingsView";
 import { ClientProvider } from "@/providers/ClientProvider";
 import type {
   ChannelSetupContract,
@@ -120,6 +120,9 @@ function settingsPayload(): SettingsPayload {
       base_url: "https://nanobot.wiki/docs/0.2.2",
       chat_apps_url: "https://nanobot.wiki/docs/0.2.2/getting-started/chat-apps",
       latest_url: "https://nanobot.wiki/docs/latest",
+    },
+    connector: {
+      enabled: false,
     },
   };
 }
@@ -304,24 +307,31 @@ function renderSettingsView(
       | "advanced"
       | "models"
       | "browser"
-      | "runtime";
+      | "runtime"
+      | "devices";
     initialSettings?: SettingsPayload;
     showSidebar?: boolean;
     onSettingsChange?: (payload: SettingsPayload) => void;
+    onSectionChange?: (section: SettingsSectionKey) => void;
     onNativeEngineRestart?: () => Promise<string>;
+    colorTheme?: "default" | "forest";
+    onChangeColorTheme?: (colorTheme: "default" | "forest") => void;
   } = {},
 ) {
   render(
     <ClientProvider client={{} as never} token="tok">
       <SettingsView
         theme="light"
+        colorTheme={options.colorTheme}
         initialSection={options.initialSection ?? "apps"}
         initialSettings={options.initialSettings}
         showSidebar={options.showSidebar}
         onToggleTheme={() => {}}
+        onChangeColorTheme={options.onChangeColorTheme}
         onBackToChat={() => {}}
         onModelNameChange={() => {}}
         onSettingsChange={options.onSettingsChange}
+        onSectionChange={options.onSectionChange}
         onNativeEngineRestart={options.onNativeEngineRestart}
       />
     </ClientProvider>,
@@ -365,6 +375,26 @@ describe("SettingsView Apps catalog", () => {
       const saved = JSON.parse(localStorage.getItem("nanobot-webui.settings-preferences") || "{}");
       expect(saved.fileEditDisplayMode).toBe("diff");
     });
+  });
+
+  it("switches the color theme from the appearance section", async () => {
+    const onChangeColorTheme = vi.fn();
+    renderSettingsView({
+      initialSection: "appearance",
+      initialSettings: settingsPayload(),
+      showSidebar: true,
+      colorTheme: "default",
+      onChangeColorTheme,
+    });
+
+    expect(screen.getByText("Theme")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Forest" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forest" }));
+    expect(onChangeColorTheme).toHaveBeenCalledWith("forest");
+
+    fireEvent.click(screen.getByRole("button", { name: "Default" }));
+    expect(onChangeColorTheme).toHaveBeenCalledWith("default");
   });
 
   it("does not show the Settings kicker on the standalone Automations surface", async () => {
@@ -2747,5 +2777,99 @@ describe("SettingsView Apps catalog", () => {
         }),
       ),
     );
+  });
+});
+
+describe("SettingsView connector devices nav", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("hides Devices nav when connector is disabled", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url === "/api/settings") return jsonResponse(settingsPayload());
+        return jsonResponse({});
+      }),
+    );
+
+    renderSettingsView({
+      initialSection: "overview",
+      initialSettings: settingsPayload(),
+      showSidebar: true,
+    });
+
+    await waitFor(() => {
+      const nav = screen.getByRole("navigation", { name: /Settings sections/i });
+      expect(within(nav).getByText("Overview")).toBeInTheDocument();
+    });
+    const nav = screen.getByRole("navigation", { name: /Settings sections/i });
+    expect(within(nav).queryByText("Devices")).not.toBeInTheDocument();
+  });
+
+  it("shows Devices nav when connector is enabled", async () => {
+    const payload = {
+      ...settingsPayload(),
+      connector: { enabled: true },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url === "/api/settings") return jsonResponse(payload);
+        if (url === "/api/connector/nodes") return jsonResponse({ nodes: [] });
+        return jsonResponse({});
+      }),
+    );
+
+    renderSettingsView({
+      initialSection: "devices",
+      initialSettings: payload,
+      showSidebar: true,
+    });
+
+    await waitFor(() => {
+      const nav = screen.getByRole("navigation", { name: /Settings sections/i });
+      expect(within(nav).getByText("Devices")).toBeInTheDocument();
+    });
+  });
+
+  it("stays on devices when the nav item is clicked", async () => {
+    const payload = {
+      ...settingsPayload(),
+      connector: { enabled: true },
+    };
+    const onSectionChange = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url === "/api/settings") return jsonResponse(payload);
+        if (url === "/api/connector/nodes") return jsonResponse({ nodes: [] });
+        if (url === "/api/connector/downloads") return jsonResponse({
+          version: "0.1.0",
+          tag: "connector-v0.1.0",
+          releasesUrl: "https://example.com/releases",
+          sourceInstall: "pip install nanobot-connector",
+          platforms: [],
+        });
+        return jsonResponse({});
+      }),
+    );
+
+    renderSettingsView({
+      initialSection: "overview",
+      initialSettings: payload,
+      showSidebar: true,
+      onSectionChange,
+    });
+
+    const nav = screen.getByRole("navigation", { name: /Settings sections/i });
+    fireEvent.click(within(nav).getByRole("button", { name: "Devices" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Devices" })).toBeInTheDocument();
+    });
+    expect(onSectionChange).toHaveBeenCalledWith("devices");
+    expect(screen.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument();
   });
 });

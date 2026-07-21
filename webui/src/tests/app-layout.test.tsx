@@ -169,6 +169,8 @@ vi.mock("@/hooks/useTheme", async () => {
     useTheme: () => ({
       theme: "light" as const,
       toggle: toggleThemeSpy,
+      colorTheme: "default" as const,
+      setColorTheme: () => {},
     }),
     useThemeValue: () => "light" as const,
   };
@@ -1771,6 +1773,44 @@ describe("App layout", () => {
 
     expect(await screen.findByRole("heading", { name: "Voice input" })).toBeInTheDocument();
     expect(window.location.hash).toBe("#/settings?section=voice");
+  });
+
+  it("opens Devices on the first click and keeps the section in the URL hash", async () => {
+    mockFetchRoutes({
+      "/api/settings": { ...baseSettingsPayload(), connector: { enabled: true } },
+      "/api/connector/nodes": { nodes: [] },
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Settings" }));
+
+    const settingsNav = screen.getByRole("navigation", { name: "Settings sections" });
+    await waitFor(() => {
+      expect(within(settingsNav).getByRole("button", { name: "Devices" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(within(settingsNav).getByRole("button", { name: "Devices" }));
+
+    expect(await screen.findByRole("heading", { name: "Devices" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/settings?section=devices");
+    expect(screen.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument();
+  });
+
+  it("restores the devices settings section from the URL hash after a page reload", async () => {
+    mockFetchRoutes({
+      "/api/settings": { ...baseSettingsPayload(), connector: { enabled: true } },
+      "/api/connector/nodes": { nodes: [] },
+    });
+    window.history.replaceState(null, "", "/#/settings?section=devices");
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    expect(await screen.findByRole("heading", { name: "Devices" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/settings?section=devices");
   });
 
   it("opens Apps from the main sidebar without replacing the sidebar", async () => {

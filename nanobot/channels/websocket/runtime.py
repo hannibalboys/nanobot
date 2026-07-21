@@ -260,6 +260,7 @@ class WebSocketChannel(BaseChannel):
         self._ingress = gateway.ingress
         self._transcripts = gateway.transcripts
         self._workspaces = gateway.workspaces
+        self._connector = getattr(gateway, "connector", None)
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
 
@@ -353,6 +354,17 @@ class WebSocketChannel(BaseChannel):
     async def _dispatch_http(self, connection: Any, request: WsRequest) -> Any:
         """Route an inbound HTTP request to the HTTP handler or WS upgrade."""
         got, query = _parse_request_path(request.path)
+
+        # Connector data channel — separate WS path, device-token auth
+        if self._connector is not None and self._connector.enabled:
+            if got == self._connector.config.path and _is_websocket_upgrade(request):
+                if self._connector.authorize_ws(query) is None:
+                    return connection.respond(401, "Unauthorized")
+                return None  # accept handshake; _connection_loop routes to the hub
+            if self._connector.owns_http_route(got):
+                response = await self._connector.handle_http(connection, request, got)
+                if response is not None:
+                    return response
 
         # WebSocket upgrade — channel handles this itself
         expected_ws = self._expected_path()
@@ -479,7 +491,20 @@ class WebSocketChannel(BaseChannel):
     async def _connection_loop(self, connection: Any) -> None:
         request = connection.request
         path_part = request.path if request else "/"
-        _, query = _parse_request_path(path_part)
+        got, query = _parse_request_path(path_part)
+
+        # Connector data channel: hand the connection to the hub, not the chat loop.
+        if (
+            self._connector is not None
+            and self._connector.enabled
+            and got == self._connector.config.path
+        ):
+            device = self._connector.authorize_ws(query)
+            if device is None:
+                return
+            await self._connector.serve_ws(connection, device)
+            return
+
         client_id_raw = _query_first(query, "client_id")
         client_id = client_id_raw.strip() if client_id_raw else ""
         if not client_id:

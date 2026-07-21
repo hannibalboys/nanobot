@@ -529,6 +529,22 @@ def test_settings_payload_includes_network_safety_fields(
     assert payload["advanced"]["ssrf_whitelist_count"] == 1
 
 
+def test_settings_payload_includes_connector_enabled_flag(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.connector.enabled = True
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    monkeypatch.setattr("nanobot.webui.workspaces.get_webui_dir", lambda: tmp_path / "webui")
+
+    payload = settings_payload()
+
+    assert payload["connector"]["enabled"] is True
+
+
 def test_settings_payload_includes_exec_path_flags(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

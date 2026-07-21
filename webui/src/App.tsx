@@ -104,6 +104,7 @@ const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
   "voice",
   "browser",
   "channels",
+  "devices",
   "apps",
   "automations",
   "skills",
@@ -901,7 +902,7 @@ function Shell({
 }) {
   const { t, i18n } = useTranslation();
   const { client, token } = useClient();
-  const { theme, toggle } = useTheme();
+  const { theme, toggle, colorTheme, setColorTheme } = useTheme();
   const {
     sessions,
     loading,
@@ -2041,10 +2042,12 @@ function Shell({
               <div className="absolute inset-0 flex flex-col">
                 <SettingsView
                   theme={theme}
+                  colorTheme={colorTheme}
                   initialSection={settingsInitialSection}
                   initialSettings={settingsSnapshot}
                   showSidebar={view === "settings"}
                   onToggleTheme={toggle}
+                  onChangeColorTheme={setColorTheme}
                   onBackToChat={onBackToChat}
                   onModelNameChange={onModelNameChange}
                   onSettingsChange={setSettingsSnapshot}

@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   configureChannel,
+  createConnectorPairingCode,
   createModelConfiguration,
   deleteSession,
+  fetchConnectorNodes,
   fetchFilePreview,
   fetchFilePreviewAvailability,
   fetchAutomations,
@@ -30,6 +32,7 @@ import {
   runAutomationAction,
   runCliAppAction,
   runMcpPresetAction,
+  revokeConnectorNode,
   saveCustomMcpServer,
   startApiService,
   stopApiService,
@@ -887,6 +890,47 @@ describe("webui API helpers", () => {
       expect.objectContaining({
         headers: { Authorization: "Bearer tok" },
       }),
+    );
+  });
+
+  it("fetches connector nodes", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ nodes: [{ nodeId: "dev-1", name: "PC", platform: "windows", online: true }] }),
+    } as Response);
+
+    const payload = await fetchConnectorNodes("tok");
+    expect(payload.nodes).toHaveLength(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connector/nodes",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+  });
+
+  it("creates connector pairing code", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ code: "AB12CD34", expiresAt: 1_700_000_000 }),
+    } as Response);
+
+    const payload = await createConnectorPairingCode("tok");
+    expect(payload.code).toBe("AB12CD34");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connector/pairing-codes",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
+    );
+  });
+
+  it("revokes connector node by query param", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ revoked: "dev-abc" }),
+    } as Response);
+
+    await revokeConnectorNode("tok", "dev-abc");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connector/revoke?nodeId=dev-abc",
+      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
     );
   });
 });

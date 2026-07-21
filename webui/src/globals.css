@@ -66,6 +66,67 @@
     --scrollbar-thumb: hsl(var(--muted-foreground) / 0.28);
     --scrollbar-thumb-hover: hsl(var(--muted-foreground) / 0.44);
   }
+
+  /* Forest theme — green palette ported from CerebraBot.
+     Light: "E-Ink Terminal", dark: "Deep Forest".
+     Must come after .dark so the compound selector below wins by specificity. */
+  [data-theme="forest"] {
+    color-scheme: light;
+    --background: 100 13% 91%; /* #e7ebe5 */
+    --foreground: 152.3 27.7% 9.2%; /* #111e18 */
+    --card: 96 20% 95.1%; /* #f2f5f0 */
+    --card-foreground: 152.3 27.7% 9.2%;
+    --popover: 96 20% 95.1%;
+    --popover-foreground: 152.3 27.7% 9.2%;
+    --primary: 159.5 100% 16.1%; /* #005236 */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 111.4 11.1% 87.6%; /* #dde3dc */
+    --secondary-foreground: 152.3 27.7% 9.2%;
+    --muted: 111.4 11.1% 87.6%;
+    --muted-foreground: 151.8 23.6% 28.2%; /* #375949 */
+    --accent: 111.4 8.4% 83.7%; /* #d3d9d2 */
+    --accent-foreground: 152.3 27.7% 9.2%;
+    --destructive: 0 75.5% 41.6%; /* #ba1a1a */
+    --destructive-foreground: 0 0% 100%;
+    --border: 127.5 5.8% 72.9%; /* #b6beb7 */
+    --input: 127.5 5.8% 72.9%;
+    --ring: 159.5 100% 16.1%;
+    --inline-token-highlight: 160.4 100% 18.6%; /* #005f40 */
+    --sidebar: 111.4 11.1% 87.6%; /* #dde3dc */
+    --sidebar-foreground: 152.3 27.7% 9.2%;
+    --sidebar-accent: 111.4 8.4% 83.7%;
+    --sidebar-accent-foreground: 152.3 27.7% 9.2%;
+    --sidebar-border: 127.5 5.8% 72.9%;
+  }
+
+  [data-theme="forest"].dark {
+    color-scheme: dark;
+    --background: 152.3 41.9% 6.1%; /* #091610 */
+    --foreground: 140 23.1% 87.3%; /* #d7e6dc */
+    --card: 152.3 27.7% 9.2%; /* #111e18 */
+    --card-foreground: 140 23.1% 87.3%;
+    --popover: 152.3 27.7% 9.2%;
+    --popover-foreground: 140 23.1% 87.3%;
+    --primary: 145.3 48.7% 84.7%; /* #c5ebd5 */
+    --primary-foreground: 154.3 46.7% 14.7%; /* #143728 */
+    --secondary: 152.3 23.6% 10.8%; /* #15221c */
+    --secondary-foreground: 140 23.1% 87.3%;
+    --muted: 152.3 23.6% 10.8%;
+    --muted-foreground: 128.6 6% 77.1%; /* #c1c8c2 */
+    --accent: 147.7 16.9% 15.1%; /* #202d26 */
+    --accent-foreground: 140 23.1% 87.3%;
+    --destructive: 355.9 100% 28.8%; /* #93000a */
+    --destructive-foreground: 5.9 100% 92%; /* #ffdad6 */
+    --border: 145.7 5.1% 26.9%; /* #414844 */
+    --input: 145.7 5.1% 26.9%;
+    --ring: 146.8 28.4% 73.7%; /* #a9cfba */
+    --inline-token-highlight: 155.4 68.6% 58.8%; /* #4edea3 */
+    --sidebar: 152.3 33.3% 7.6%; /* #0d1a14 */
+    --sidebar-foreground: 140 23.1% 87.3%;
+    --sidebar-accent: 147.7 16.9% 15.1%;
+    --sidebar-accent-foreground: 140 23.1% 87.3%;
+    --sidebar-border: 145.7 5.1% 26.9%;
+  }
 }
 
 @layer base {

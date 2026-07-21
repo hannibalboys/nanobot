@@ -31,6 +31,7 @@ class GatewayServices:
     local_trigger_store: Any | None
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
+    connector: Any | None = None
 
 
 def build_gateway_services(
@@ -51,6 +52,7 @@ def build_gateway_services(
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
     channel_feature_action: Callable[..., Any] | None = None,
     channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+    connector_config: Any | None = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
     tokens = GatewayTokenStore()
@@ -96,6 +98,16 @@ def build_gateway_services(
         channel_runtime_status=channel_runtime_status,
         log=logger,
     )
+    connector = None
+    if connector_config is not None and getattr(connector_config, "enabled", False):
+        from nanobot.connector.gateway import ConnectorGateway
+
+        connector = ConnectorGateway(
+            connector_config,
+            workspace_path=workspace_path,
+            ws_config=config,
+            tokens=tokens,
+        )
     return GatewayServices(
         http=http,
         tokens=tokens,
@@ -108,4 +120,5 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
+        connector=connector,
     )

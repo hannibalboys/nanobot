@@ -175,6 +175,7 @@ class ChannelManager:
                 local_trigger_pending_ids=self._webui_local_trigger_pending_ids,
                 channel_feature_action=self.apply_channel_feature_action,
                 channel_runtime_status=self.get_status,
+                connector_config=self.config.connector,
                 logger=logger,
             )
             kwargs["gateway"] = gateway

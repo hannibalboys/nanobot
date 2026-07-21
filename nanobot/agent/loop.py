@@ -286,10 +286,12 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
+        connector_config: Any | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
         _tc = tools_config or ToolsConfig()
+        self.connector_config = connector_config
         defaults = AgentDefaults()
         self.bus = bus
         self.runtime_events = runtime_events or RuntimeEventBus()
@@ -479,6 +481,7 @@ class AgentLoop:
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             restart_mode=config.gateway.restart_mode,
+            connector_config=getattr(config, "connector", None),
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
             **extra,
@@ -550,6 +553,7 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_events=self.runtime_events,
+            connector_config=self.connector_config,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)

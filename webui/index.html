@@ -37,6 +37,16 @@
         color: #fafafa;
       }
 
+      html[data-theme="forest"] body {
+        background: #e7ebe5;
+        color: #111e18;
+      }
+
+      html[data-theme="forest"].dark body {
+        background: #091610;
+        color: #d7e6dc;
+      }
+
       .boot-splash {
         display: flex;
         height: 100%;
@@ -87,6 +97,10 @@
               window.matchMedia &&
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           if (dark) document.documentElement.classList.add("dark");
+          var colorTheme = localStorage.getItem("nanobot-webui.color-theme");
+          if (colorTheme === "forest") {
+            document.documentElement.setAttribute("data-theme", "forest");
+          }
         } catch {}
       })();
     </script>
