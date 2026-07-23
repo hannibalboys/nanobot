@@ -45,6 +45,7 @@
 | Open the bundled browser UI | [WebUI](#-webui) |
 | Connect Telegram, Discord, WeChat, Slack, Email, Mattermost, or another chat app | [Chat Apps](./docs/chat-apps.md) |
 | Configure providers, fallback models, Langfuse, MCP, web tools, or security | [Docs](./docs/README.md) and [Configuration](./docs/configuration.md) |
+| Deploy reproducibly or connect a remote computer | [生产部署与连接器](./docs/connector-deployment.md) |
 | Understand or extend the internals | [Architecture](./docs/architecture.md) and [Development](./docs/development.md) |
 | Deploy to the cloud in one click | [Deploy to Render](#deploy-to-render) |
 
@@ -67,6 +68,7 @@ nanobot is a self-hosted personal AI agent runtime. It can:
 - run long-horizon goals and scheduled automations
 - expose a Python SDK and OpenAI-compatible API for integrations
 - deploy as a long-running local or server-side agent gateway
+- connect explicitly paired remote computers for allow-listed files, registered local tools, MCP, and controlled desktop sessions
 
 ## Latest Release
 
@@ -91,6 +93,7 @@ Highlights:
 
 ## Recent Updates
 
+- **2026-07-23** Versioned portable configuration, safe connector re-pairing, local tool profiles, and OS credential storage.
 - **2026-07-12** Explicit `/goal` activation, safer runtime and workspace access.
 - **2026-07-11** Syntax-highlighted previews and diffs, queued prompts, safer edits.
 - **2026-07-10** Stable model routing, multiline CLI input, new automation guide.
@@ -285,6 +288,48 @@ nanobot agent
 ```
 
 Need help with `PATH`, API keys, provider/model matching, or JSON errors? See the fuller [Install and Quick Start](./docs/quick-start.md) and [Troubleshooting](./docs/troubleshooting.md).
+
+## 🔌 可迁移部署与连接器
+
+服务端配置、设备身份和本机凭据有不同的安全边界。**不要**把
+`~/.nanobot/`、`~/.nanobot-connector/`、`devices.json`、`grants.json` 或设备 token
+直接复制到新服务器。可迁移的是经过审阅的无密钥部署档案；换服务器后，每台连接器都必须
+重新配对并重新授予执行、MCP 或桌面控制权限。
+
+新服务器首次部署：
+
+```powershell
+# 使用内置保守模板；团队也可显式提供 --template deployment/profiles/production.json
+nanobot config init
+nanobot config validate --strict
+nanobot config doctor --strict
+nanobot gateway
+```
+
+从已有服务器导出需人工审阅的无密钥档案：
+
+```powershell
+nanobot config export-profile --output .\deployment\profiles\production.json
+```
+
+同一台服务器升级时，使用 `nanobot config refresh` 补齐新字段；命令会创建备份，但不会让
+运行中的 gateway 热更新，因此随后必须执行 `nanobot gateway restart`。
+
+远程 Windows 电脑安装新版连接器后：
+
+```powershell
+nanobot-connector init
+nanobot-connector tool import-template windows-browser-launch
+nanobot-connector doctor --strict
+
+# 在 WebUI 生成一次性配对码；从旧服务器迁移时显式添加 --replace-server
+nanobot-connector pair --server wss://新服务器:8765 --code 配对码 --replace-server
+```
+
+浏览器启动档案只确认 Chrome 已启动，不会替代网页自动化或回传搜索结果。登录态、内网系统
+或结构化业务操作应使用带参数约束与结果契约的本机自动化工具；验证码和纯 GUI 任务使用
+受控桌面会话。完整的生产部署、回滚、凭据迁移与重新配对流程见
+[生产部署与连接器](./docs/connector-deployment.md)。
 
 - Want a pasteable provider setup? See [Provider Cookbook](./docs/provider-cookbook.md)
 - Want to understand provider/model matching? See [Providers and Models](./docs/providers.md)
