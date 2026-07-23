@@ -35,8 +35,9 @@ from nanobot_connector.files import (
     TooLargeError,
     normalize_roots,
 )
+from nanobot_connector.logbuf import log_event
 from nanobot_connector.mcp_bridge import McpBridge, McpRegistry
-from nanobot_connector.runner import run_execution
+from nanobot_connector.runner import launch_execution, run_execution
 from nanobot_connector.tools import ToolDef, ToolError, ToolRegistry
 
 _BACKOFF_MIN = 1.0
@@ -144,12 +145,12 @@ class ConnectorClient:
                     await self._connect_once()
                     backoff = _BACKOFF_MIN
                 except RevokedError:
-                    print("Device revoked by server. Re-pair to reconnect.")
+                    log_event("设备已被服务端吊销，请重新配对后再连接。", "error")
                     return
                 except (OSError, websockets.WebSocketException, ssl.SSLError) as exc:
-                    print(f"connection lost: {exc}; retrying in {backoff:.0f}s")
+                    log_event(f"连接断开：{exc}；{backoff:.0f} 秒后重试", "warn")
                 except Exception as exc:  # noqa: BLE001 - keep the daemon alive
-                    print(f"unexpected error: {exc}; retrying in {backoff:.0f}s")
+                    log_event(f"出现未预期错误：{exc}；{backoff:.0f} 秒后重试", "error")
                 await asyncio.sleep(backoff + random.uniform(0, backoff * 0.25))
                 backoff = min(backoff * 2, _BACKOFF_MAX)
         finally:
@@ -162,6 +163,7 @@ class ConnectorClient:
         kwargs: dict = {}
         if scheme == "wss" and self.cfg.cert_fingerprint and not self.cfg.insecure:
             kwargs["create_connection"] = _pinned_connection_factory(self.cfg.cert_fingerprint)
+        log_event(f"正在连接 {url} …")
         async with websockets.connect(url, ssl=ssl_ctx, max_size=None, **kwargs) as ws:
             await self._register(ws)
             await self._serve(ws)
@@ -215,7 +217,7 @@ class ConnectorClient:
     async def _dispatch(self, ws, frame: dict) -> None:
         ftype = frame.get("type")
         if ftype == "registered":
-            print(f"connected as {frame.get('nodeId')}")
+            log_event(f"已连接并注册为 {frame.get('nodeId')}，等待服务端指令。")
             return
         if ftype == "revoked":
             raise RevokedError()
@@ -356,11 +358,13 @@ class ConnectorClient:
 
         if tool.approval == "local" and not await self._confirm_local(tool, args):
             audit.record(f"tools.call:{name}", "", result=proto.ERROR_APPROVAL_DENIED)
+            log_event(f"已拒绝执行「{name}」：本机未在授权窗口内授权", "warn")
             await ws.send(json.dumps(
                 proto.rpc_error(rpc_id, proto.ERROR_APPROVAL_DENIED, "denied on device")
             ))
             return
 
+        log_event(f"开始执行工具「{name}」")
         cancel_event = asyncio.Event()
         self._exec_cancels[rpc_id] = cancel_event
         if rpc_id in self._cancelled:  # cancel arrived during validation/approval
@@ -372,19 +376,40 @@ class ConnectorClient:
 
         timeout_s = float(tool.timeout_s or self.cfg.exec_timeout_s)
         try:
-            outcome = await run_execution(
-                argv,
-                env_overlay=env_overlay,
-                workdir=tool.workdir,
-                timeout_s=timeout_s,
-                max_output_bytes=self.cfg.max_exec_output_bytes,
-                on_output=on_output,
-                cancel_event=cancel_event,
-            )
+            if tool.completion == "launch":
+                log_event(f"工具「{name}」已作为常驻程序启动，不等待退出。")
+                outcome = await launch_execution(
+                    argv,
+                    env_overlay=env_overlay,
+                    workdir=tool.workdir,
+                )
+            else:
+                outcome = await run_execution(
+                    argv,
+                    env_overlay=env_overlay,
+                    workdir=tool.workdir,
+                    timeout_s=timeout_s,
+                    max_output_bytes=self.cfg.max_exec_output_bytes,
+                    on_output=on_output,
+                    cancel_event=cancel_event,
+                )
         except OSError as exc:
             audit.record(f"tools.call:{name}", "", result="error")
             with contextlib.suppress(Exception):
                 await ws.send(json.dumps(proto.rpc_error(rpc_id, proto.ERROR_INTERNAL, str(exc))))
+            return
+        except Exception as exc:  # noqa: BLE001 - a background task must always resolve its RPC
+            # ``tools.call`` is tracked by the server as an execution stream. If
+            # this task escapes unexpectedly, no exec_result/rpc_error reaches the
+            # hub and the caller waits for the full server execution timeout.
+            audit.record(f"tools.call:{name}", "", result="internal_error")
+            log_event(f"工具「{name}」执行器异常：{exc}", "error")
+            with contextlib.suppress(Exception):
+                await ws.send(json.dumps(proto.rpc_error(
+                    rpc_id,
+                    proto.ERROR_INTERNAL,
+                    "connector client failed while running the tool",
+                )))
             return
         finally:
             self._exec_cancels.pop(rpc_id, None)
@@ -394,6 +419,12 @@ class ConnectorClient:
             f"tools.call:{name}", "",
             result="cancelled" if outcome.cancelled else ("timeout" if outcome.timed_out else "ok"),
         )
+        if outcome.cancelled:
+            log_event(f"工具「{name}」已被取消", "warn")
+        elif outcome.timed_out:
+            log_event(f"工具「{name}」执行超时", "warn")
+        else:
+            log_event(f"工具「{name}」执行完成（退出码 {outcome.exit_code}）")
         await ws.send(json.dumps(proto.exec_result(
             rpc_id,
             exit_code=outcome.exit_code,
@@ -440,9 +471,11 @@ class ConnectorClient:
                     session_id, operator=params.get("operator", ""), goal=params.get("goal", ""),
                     max_dimension=params.get("maxDimension"), max_fps=params.get("maxFps"),
                 )
+                log_event(f"桌面会话已开始（目标：{params.get('goal', '') or '未说明'}）", "warn")
                 result: dict = {"started": session_id}
             elif method == "desktop.session.end":
                 self.desktop.end_session()
+                log_event("桌面会话已结束")
                 result = {"ended": True}
             elif method == "desktop.capture":
                 loop = asyncio.get_running_loop()
@@ -508,8 +541,8 @@ def build_daemon_client(cfg: ConnectorClientConfig) -> "ConnectorClient":
         return arm.is_armed("desktop")
 
     def indicator(active: bool) -> None:
-        print("● screen is being captured (desktop control active)" if active
-              else "○ screen capture stopped")
+        log_event("● 屏幕正在被远程捕获（桌面控制进行中）" if active
+                  else "○ 屏幕捕获已停止")
 
     bridge = _load_mcp_bridge(on_local_approval=approve_mcp)
     desktop = None

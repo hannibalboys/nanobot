@@ -19,6 +19,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 _READ_CHUNK = 4096
+_PROCESS_POLL_S = 0.1
+# A spawned GUI/browser process can inherit the tool parent's stdout/stderr handles.
+# Once the direct tool process exits, waiting indefinitely for EOF on those handles
+# would keep the connector RPC open until the spawned application exits.
+_POST_EXIT_DRAIN_S = 1.0
 
 # on_output(stream, text, seq) -> awaitable
 OutputCallback = Callable[[str, str, int], Awaitable[None]]
@@ -132,33 +137,37 @@ async def run_execution(
         asyncio.create_task(pump(proc.stdout, "stdout")),
         asyncio.create_task(pump(proc.stderr, "stderr")),
     ]
-    exit_task = asyncio.create_task(proc.wait())
-    conds: list[asyncio.Task] = [asyncio.create_task(truncated_evt.wait())]
-    if cancel_event is not None:
-        conds.append(asyncio.create_task(cancel_event.wait()))
-
     timed_out = cancelled = False
-    try:
-        done, _pending = await asyncio.wait(
-            [exit_task, *conds], timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
-        )
-        if not done:
-            timed_out = True
-        elif cancel_event is not None and cancel_event.is_set():
+    deadline = start + timeout_s
+    # ``asyncio.subprocess.Process.wait()`` also waits for stdout/stderr pipe
+    # transports to close. A GUI/browser grandchild may inherit those handles,
+    # so Process.wait() can remain pending after the direct tool process exits.
+    # ``returncode`` is set when that direct process exits, independently of
+    # the pipe lifetime; poll it together with cancellation and truncation.
+    while proc.returncode is None:
+        if truncated_evt.is_set():
+            break
+        if cancel_event is not None and cancel_event.is_set():
             cancelled = True
-        # else: natural exit or truncation — both fall through to cleanup
-    finally:
-        for c in conds:
-            c.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(*conds, return_exceptions=True)
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        await asyncio.sleep(min(_PROCESS_POLL_S, remaining))
 
     if proc.returncode is None:
         await _terminate_tree(proc)
 
-    # Drain remaining buffered output (bounded by the same cap) then finish.
-    with contextlib.suppress(Exception):
-        await asyncio.gather(*pumps, return_exceptions=True)
+    # Read output that was already buffered, but never wait forever for EOF. On
+    # Windows in particular, GUI/browser tools often spawn a detached child that
+    # inherits these pipe handles. The direct process has then completed, yet the
+    # stream readers stay open until the GUI closes; awaiting them indefinitely
+    # leaves the server waiting for ``exec_result`` and makes the chat look stuck.
+    _done, pending_pumps = await asyncio.wait(pumps, timeout=_POST_EXIT_DRAIN_S)
+    for pump_task in pending_pumps:
+        pump_task.cancel()
+    await asyncio.gather(*pumps, return_exceptions=True)
 
     duration_ms = int((time.monotonic() - start) * 1000)
     return ExecOutcome(
@@ -167,4 +176,41 @@ async def run_execution(
         timed_out=timed_out,
         truncated=counter.truncated,
         cancelled=cancelled,
+    )
+
+
+async def launch_execution(
+    argv: list[str],
+    *,
+    env_overlay: dict[str, str],
+    workdir: str,
+) -> ExecOutcome:
+    """Start a registered long-running GUI tool and return after it launches.
+
+    This is intentionally separate from :func:`run_execution`: it is only used
+    for an owner-declared ``completion=launch`` tool such as a browser or chat
+    client. Its output is discarded and cancellation cannot terminate it after
+    this function returns, so ordinary commands must keep the default
+    ``completion=wait`` behavior.
+    """
+    start = time.monotonic()
+    env = {**os.environ, **env_overlay}
+    flags = _spawn_kwargs()
+    if os.name == "nt":
+        flags["creationflags"] |= subprocess.DETACHED_PROCESS
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=workdir or None,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        **flags,
+    )
+    # Yield once so an immediately failing executable can expose its exit code,
+    # while a correctly launched GUI process is never waited on.
+    await asyncio.sleep(0)
+    return ExecOutcome(
+        exit_code=proc.returncode if proc.returncode is not None else 0,
+        duration_ms=int((time.monotonic() - start) * 1000),
     )

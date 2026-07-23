@@ -6,6 +6,7 @@
 .env
 .web
 .orion
+.codegraph/
 
 # Claude / AI assistant artifacts
 docs/superpowers/
@@ -90,6 +91,10 @@ nano.*.save
 # Environment & secrets (keep examples tracked if needed)
 .env.*
 !.env.example
+config.local.json
+*.credentials.json
+.nanobot/
+.nanobot-connector/
 
 # Logs & temp
 *.log

@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context
 from nanobot.connector import protocol as proto
 from nanobot.connector.audit import audit_file_access
 from nanobot.connector.hub import ConnectorError, default_hub
+from nanobot.runtime_context import RuntimeContextBlock
 
 _DEFAULT_OWNER = "webui"
 
@@ -151,8 +152,39 @@ class ConnectorListNodesTool(_ConnectorTool):
     description = (
         "List the user's online local devices (computers running the nanobot "
         "connector). Returns each device's node_id, name, platform, and shared "
-        "root folders. Use this first to discover which device to read files from."
+        "root folders. The response also includes the gateway's effective capabilities; "
+        "do not infer server configuration from a device's reported capabilities or "
+        "from earlier conversation history. Use this first to discover which device to "
+        "read files from."
     )
+
+    def runtime_context_provider(self):
+        return self._provide_runtime_context
+
+    def _effective_capabilities(self) -> dict[str, bool]:
+        return {
+            "fs": True,
+            "exec": bool(getattr(self._config, "allow_exec", False)),
+            "mcp": bool(getattr(self._config, "allow_mcp_proxy", False)),
+            "desktop": bool(getattr(self._config, "allow_desktop_control", False)),
+        }
+
+    async def _provide_runtime_context(
+        self,
+        _request: RequestContext,
+    ) -> RuntimeContextBlock:
+        capabilities = self._effective_capabilities()
+        enabled = ", ".join(name for name, value in capabilities.items() if value)
+        disabled = ", ".join(name for name, value in capabilities.items() if not value)
+        return RuntimeContextBlock(
+            source="connector_capabilities",
+            content=(
+                "连接器事实状态：本轮网关已启用能力为 "
+                f"{enabled or '无'}；未启用能力为 {disabled or '无'}。"
+                "设备上报的 capabilities 只表示客户端支持，不能据此否定网关开关，"
+                "也不得用早先对话记录与此事实状态矛盾。"
+            ),
+        )
 
     async def execute(self, **kwargs: Any) -> Any:
         nodes = self._hub.list_nodes(owner_id=self._owner_id)
@@ -166,7 +198,13 @@ class ConnectorListNodesTool(_ConnectorTool):
             alias = aliases.get(node.get("nodeId", ""))
             if alias:
                 node["alias"] = alias
-        return json.dumps({"nodes": nodes}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "nodes": nodes,
+                "effectiveCapabilities": self._effective_capabilities(),
+            },
+            ensure_ascii=False,
+        )
 
     def _device_aliases(self) -> dict[str, str]:
         """Best-effort node_id -> owner-set alias, to help the LLM target devices."""
@@ -323,11 +361,23 @@ class _ConnectorExecTool(_ConnectorTool):
                  hub: Any | None = None, owner_id: str = _DEFAULT_OWNER) -> None:
         super().__init__(connector_config=connector_config, workspace=workspace,
                          hub=hub, owner_id=owner_id)
-        if coordinator is None:
-            from nanobot.connector.exec import default_execution_coordinator
+        self._explicit_coordinator = coordinator
 
-            coordinator = default_execution_coordinator()
-        self._coordinator = coordinator
+    @property
+    def _coordinator(self) -> Any:
+        """Resolve the shared coordinator lazily on every call.
+
+        The agent builds its tools (and runs this ``__init__``) *before* the
+        websocket channel builds the connector gateway, so reading
+        ``default_execution_coordinator()`` once at construction time would
+        permanently capture ``None``. Resolving per-call picks up the gateway's
+        registration whenever it happens.
+        """
+        if self._explicit_coordinator is not None:
+            return self._explicit_coordinator
+        from nanobot.connector.exec import default_execution_coordinator
+
+        return default_execution_coordinator()
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
@@ -345,9 +395,25 @@ class _ConnectorExecTool(_ConnectorTool):
         return self._owner_id
 
     def _no_coordinator(self) -> ToolResult:
+        # Being here means the tool was *enabled* (config allow_exec=True) yet no
+        # shared coordinator was registered — the connector gateway either failed
+        # to build or ran before this process. Surface both facts so the failure
+        # is diagnosable instead of a misleading "allowExec is off".
+        from loguru import logger
+
+        cfg_on = bool(
+            self._config is not None
+            and getattr(self._config, "allow_exec", False)
+        )
+        logger.error(
+            "connector exec tool has no coordinator: config.allow_exec={} but the "
+            "shared ExecutionCoordinator was never registered (gateway not up?)",
+            cfg_on,
+        )
         return ToolResult.error(
-            "Controlled execution is not available on this server "
-            "(connector.allowExec is off)."
+            "Controlled execution coordinator is not running in this process "
+            f"(config.allowExec={cfg_on}, shared coordinator missing). "
+            "Restart the gateway so the connector service registers it."
         )
 
 
@@ -364,7 +430,10 @@ class ConnectorListToolsTool(_ConnectorExecTool):
     description = (
         "List the tools the owner of a paired local device has registered for "
         "remote execution. Returns each tool's name, description, parameters, and "
-        "approval policy. Call this before connector_call_tool."
+        "approval/completion policy. Call this before connector_call_tool. A local "
+        "approval is a device-side pre-authorization check, not a pending WebUI "
+        "approval dialog; do not tell the user it is waiting for a click unless the "
+        "tool explicitly uses webui approval."
     )
 
     async def execute(self, node_id: str, **kwargs: Any) -> Any:
@@ -381,7 +450,31 @@ class ConnectorListToolsTool(_ConnectorExecTool):
                 "This device has no registered tools. Ask the user to register one "
                 "with `nanobot-connector tool add` on that computer."
             )
-        return json.dumps({"tools": tools}, ensure_ascii=False)
+        normalized_tools = [
+            {
+                **tool,
+                # Older connector clients do not send completion; their historic
+                # behavior is always to wait for the launched process to exit.
+                "completion": tool.get("completion", "wait"),
+            }
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
+        return json.dumps(
+            {
+                "tools": normalized_tools,
+                "approvalSemantics": {
+                    "local": "本机限时预授权检查；未授权会立即拒绝，不会等待网页端按钮。",
+                    "webui": "服务端会等待 WebUI 用户逐次批准，直到批准或超时。",
+                    "auto": "不需要额外审批，仍受既有授权和限流约束。",
+                },
+                "completionSemantics": {
+                    "wait": "等待本机进程结束并回传输出；浏览器、QQ 等常驻程序会一直占用调用。",
+                    "launch": "仅确认本机程序已启动后立即返回；不等待退出，也不回传程序输出。",
+                },
+            },
+            ensure_ascii=False,
+        )
 
 
 @tool_parameters({
@@ -520,11 +613,17 @@ class _ConnectorDesktopTool(_ConnectorTool):
                  hub: Any | None = None, owner_id: str = _DEFAULT_OWNER) -> None:
         super().__init__(connector_config=connector_config, workspace=workspace,
                          hub=hub, owner_id=owner_id)
-        if manager is None:
-            from nanobot.connector.desktop import default_desktop_manager
+        self._explicit_manager = manager
 
-            manager = default_desktop_manager()
-        self._manager = manager
+    @property
+    def _manager(self) -> Any:
+        """Resolve the shared desktop manager lazily (same build-order reason as
+        the exec coordinator: tools are constructed before the gateway registers)."""
+        if self._explicit_manager is not None:
+            return self._explicit_manager
+        from nanobot.connector.desktop import default_desktop_manager
+
+        return default_desktop_manager()
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
+import subprocess
 import sys
 import time
 
 import pytest
 
-from nanobot_connector.runner import run_execution
+from nanobot_connector.runner import launch_execution, run_execution
 
 
 async def _collect(argv, **kwargs):
@@ -100,6 +104,52 @@ async def test_output_truncated_at_cap():
     assert outcome.truncated is True
     total = sum(len(c[1]) for c in chunks)
     assert total <= 1000
+
+
+async def test_parent_exit_does_not_wait_for_grandchild_pipe_eof(tmp_path):
+    """A GUI/browser child may keep inherited stdout open after its parent exits."""
+    pid_path = tmp_path / "grandchild.pid"
+    script = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'])\n"
+        f"open({str(pid_path)!r}, 'w', encoding='utf-8').write(str(child.pid))\n"
+        "print('parent complete', flush=True)\n"
+        # Bypass interpreter cleanup, which may keep a Popen object alive long
+        # enough to obscure the inherited-pipe behavior we need to cover.
+        "os._exit(0)\n"
+    )
+    start = time.monotonic()
+    try:
+        outcome, chunks = await _collect(_py(script), timeout_s=10.0)
+        elapsed = time.monotonic() - start
+        assert outcome.exit_code == 0
+        assert elapsed < 2.0
+        assert "parent complete" in "".join(text for _stream, text, _seq in chunks)
+    finally:
+        if pid_path.exists():
+            pid = int(pid_path.read_text(encoding="utf-8"))
+            if os.name == "nt":
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(pid),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                with contextlib.suppress(Exception):
+                    await killer.wait()
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGTERM)
+
+
+async def test_launch_returns_without_waiting_for_long_running_process():
+    start = time.monotonic()
+    outcome = await launch_execution(
+        _py("import time; time.sleep(3)"),
+        env_overlay={},
+        workdir="",
+    )
+    assert outcome.exit_code == 0
+    assert time.monotonic() - start < 1.0
 
 
 async def test_missing_executable_raises_oserror():

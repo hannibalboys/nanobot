@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings
 from nanobot.config_base import Base
 from nanobot.cron.types import CronSchedule
 
+CONFIG_SCHEMA_VERSION = 1
+
 if TYPE_CHECKING:
     from nanobot.agent.tools.cli_apps import CliAppsToolConfig
     from nanobot.agent.tools.filesystem import FileToolsConfig
@@ -460,6 +462,12 @@ class ToolsConfig(Base):
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
+    schema_version: int = Field(
+        default=CONFIG_SCHEMA_VERSION,
+        ge=1,
+        validation_alias=AliasChoices("schemaVersion", "schema_version"),
+        serialization_alias="schemaVersion",
+    )
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)

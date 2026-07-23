@@ -1,0 +1,20 @@
+{
+  "tools": [
+    {
+      "name": "browser-launch",
+      "description": "仅启动系统默认浏览器；不执行网页检索，也不返回网页结果。",
+      "exec": "xdg-open",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true,
+          "pattern": "https?://[^\\s]+"
+        }
+      ],
+      "argv": ["{url}"],
+      "approval": "local",
+      "completion": "launch"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ from nanobot.agent.tools.connector import (
     _ConnectorMcpTool,
     _ConnectorTool,
 )
+from nanobot.agent.tools.context import RequestContext
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import ConnectorConfig
@@ -92,6 +93,30 @@ async def test_list_nodes_returns_nodes(tmp_path):
     tool = _tool(ConnectorListNodesTool, hub, tmp_path)
     out = await tool.execute()
     assert "dev-1" in str(out)
+
+
+async def test_list_nodes_includes_effective_gateway_capabilities(tmp_path):
+    hub = FakeHub(nodes=[{"nodeId": "dev-1", "name": "PC", "ownerId": "webui"}])
+    cfg = ConnectorConfig(
+        enabled=True,
+        allow_exec=True,
+        allow_mcp_proxy=False,
+        allow_desktop_control=True,
+    )
+    tool = ConnectorListNodesTool(connector_config=cfg, workspace=tmp_path, hub=hub)
+    payload = json.loads(str(await tool.execute()))
+    assert payload["effectiveCapabilities"] == {
+        "fs": True,
+        "exec": True,
+        "mcp": False,
+        "desktop": True,
+    }
+
+    provider = tool.runtime_context_provider()
+    assert provider is not None
+    block = await provider(RequestContext(channel="websocket", chat_id="chat"))
+    assert "exec, desktop" in block.content
+    assert "未启用能力为 mcp" in block.content
 
 
 async def test_list_files_error_mapping(tmp_path):
@@ -212,6 +237,14 @@ async def test_list_tools_returns_schema(tmp_path):
     tool = _exec_tool(ConnectorListToolsTool, coord, tmp_path)
     out = await tool.execute(node_id="dev-1")
     assert "open_notepad" in str(out)
+
+
+async def test_list_tools_returns_approval_and_completion_semantics(tmp_path):
+    coord = FakeCoordinator(tools=[{"name": "qq", "approval": "local", "params": []}])
+    tool = _exec_tool(ConnectorListToolsTool, coord, tmp_path)
+    payload = json.loads(str(await tool.execute(node_id="dev-1")))
+    assert payload["tools"][0]["completion"] == "wait"
+    assert "本机限时预授权" in payload["approvalSemantics"]["local"]
 
 
 async def test_list_tools_empty_message(tmp_path):

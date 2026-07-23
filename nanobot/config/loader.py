@@ -3,14 +3,17 @@
 import json
 import os
 import re
+import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import pydantic
+from filelock import FileLock, Timeout
 from loguru import logger
 from pydantic import BaseModel
 
-from nanobot.config.schema import Config, _resolve_tool_config_refs
+from nanobot.config.schema import CONFIG_SCHEMA_VERSION, Config, _resolve_tool_config_refs
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
@@ -30,12 +33,15 @@ def get_config_path() -> Path:
     return Path.home() / ".nanobot" / "config.json"
 
 
-def load_config(config_path: Path | None = None) -> Config:
+def load_config(config_path: Path | None = None, *, resolve_env: bool = False) -> Config:
     """
     Load configuration from file or create default.
 
     Args:
         config_path: Optional path to config file. Uses default if not provided.
+        resolve_env: Resolve ``${NAME}`` references before Pydantic validation.
+            Runtime entry points use this for numeric and boolean settings; editing
+            surfaces keep the original placeholders by using the default.
 
     Returns:
         Loaded configuration object.
@@ -53,6 +59,8 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
+            if resolve_env:
+                data = _resolve_env_vars(data)
             config = Config.model_validate(data)
         except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
             raise ValueError(f"Failed to load config from {path}: {e}") from e
@@ -77,16 +85,54 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         config_path: Optional path to save to. Uses default if not provided.
     """
     path = config_path or get_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    data = config_to_dict(config)
+    try:
+        with FileLock(str(path) + ".lock", timeout=10):
+            _write_json_atomic(path, data)
+    except Timeout as exc:
+        raise ValueError(f"Timed out waiting to write config {path}") from exc
 
+
+def config_to_dict(config: Config) -> dict[str, Any]:
+    """Serialize a config without resolving ``${ENV_VAR}`` placeholders."""
     data = config.model_dump(mode="json", by_alias=True)
     if config.providers.openai_codex.proxy is not None:
         data.setdefault("providers", {})["openaiCodex"] = {
             "proxy": config.providers.openai_codex.proxy,
         }
+    return data
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    """Durably replace a JSON file without exposing a partial document."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        if os.name != "nt":
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+            except OSError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -171,6 +217,21 @@ def _env_replace(match: re.Match[str]) -> str:
 
 def _migrate_config(data: dict) -> dict:
     """Migrate old config formats to current."""
+    if not isinstance(data, dict):
+        raise ValueError("Configuration root must be a JSON object")
+    data = deepcopy(data)
+    raw_version = data.get("schemaVersion", data.get("schema_version", 0))
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("schemaVersion must be an integer") from exc
+    if version < 0:
+        raise ValueError("schemaVersion must not be negative")
+    if version > CONFIG_SCHEMA_VERSION:
+        raise ValueError(
+            f"Configuration schemaVersion {version} is newer than this nanobot "
+            f"release ({CONFIG_SCHEMA_VERSION})"
+        )
     agents = data.get("agents", {})
     defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
     if isinstance(defaults, dict):
@@ -208,4 +269,6 @@ def _migrate_config(data: dict) -> dict:
         else:
             tools.pop("mySet", None)
 
+    data.pop("schema_version", None)
+    data["schemaVersion"] = CONFIG_SCHEMA_VERSION
     return data

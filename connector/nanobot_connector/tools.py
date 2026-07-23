@@ -7,8 +7,8 @@ templates and rendered into an ``argv`` list that runs WITHOUT a shell, so shell
 metacharacters inside a value can never be interpreted.
 
 Credentials never leave this machine: literal env vars live in the tool definition,
-while secret references map an env var to an id in a separate ``secrets.json`` (mode
-0600). ``tools.list`` exposes only names/params/approval and the *names* of required
+while secret references map an env var to an id in the operating system credential
+store. ``tools.list`` exposes only names/params/approval and the *names* of required
 env/secret vars — never any secret value.
 """
 
@@ -24,11 +24,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from nanobot_connector.config import config_dir
+from nanobot_connector.credentials import CredentialStoreError, SecretStore
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 ApprovalPolicy = Literal["auto", "webui", "local"]
+CompletionPolicy = Literal["wait", "launch"]
 ParamType = Literal["string", "int", "enum", "path"]
 
 
@@ -103,6 +105,7 @@ class ToolDef(_Model):
     workdir: str = ""
     timeout_s: int | None = None  # falls back to the connector-wide exec timeout
     approval: ApprovalPolicy = "local"  # safe default: owner confirms on this machine
+    completion: CompletionPolicy = "wait"  # launch returns after starting a GUI/app
     env: dict[str, str] = Field(default_factory=dict)  # literal, non-secret env vars
     secrets: dict[str, str] = Field(default_factory=dict)  # env var -> secret id
 
@@ -119,6 +122,7 @@ class ToolDef(_Model):
             "name": self.name,
             "description": self.description,
             "approval": self.approval,
+            "completion": self.completion,
             "params": [
                 {
                     "name": p.name,
@@ -133,50 +137,6 @@ class ToolDef(_Model):
             "envVars": sorted(self.env.keys()),
             "secretVars": sorted(self.secrets.keys()),
         }
-
-
-class SecretStore:
-    """On-device credential store (``secrets.json``, mode 0600). Never serialized to
-    the protocol; only referenced by id from a tool's ``secrets`` map."""
-
-    def __init__(self, path: Path | None = None) -> None:
-        self._path = path or (config_dir() / "secrets.json")
-
-    def _load(self) -> dict[str, str]:
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            return {}
-        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-
-    def _save(self, data: dict[str, str]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
-        try:
-            os.chmod(self._path, 0o600)
-        except OSError:
-            pass  # best-effort on platforms without POSIX perms
-
-    def get(self, secret_id: str) -> str | None:
-        return self._load().get(secret_id)
-
-    def set(self, secret_id: str, value: str) -> None:
-        data = self._load()
-        data[secret_id] = value
-        self._save(data)
-
-    def delete(self, secret_id: str) -> bool:
-        data = self._load()
-        if secret_id not in data:
-            return False
-        del data[secret_id]
-        self._save(data)
-        return True
-
-    def ids(self) -> list[str]:
-        return sorted(self._load().keys())
 
 
 class ToolRegistry:
@@ -267,7 +227,10 @@ class ToolRegistry:
     def _resolve_env(self, tool: ToolDef) -> dict[str, str]:
         env = dict(tool.env)
         for var, secret_id in tool.secrets.items():
-            value = self._secrets.get(secret_id)
+            try:
+                value = self._secrets.get(secret_id)
+            except CredentialStoreError as exc:
+                raise MissingCredentialError(str(exc)) from exc
             if value is None:
                 raise MissingCredentialError(
                     f"credential '{secret_id}' for env var '{var}' is not configured on this device"

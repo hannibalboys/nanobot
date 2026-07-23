@@ -66,6 +66,18 @@ class TestResolveConfig:
         resolved = resolve_config_env_vars(raw)
         assert resolved.providers.groq.api_key == "resolved-key"
 
+    def test_runtime_load_resolves_numeric_value_before_schema_validation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEST_GATEWAY_PORT", "18999")
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({"gateway": {"port": "${TEST_GATEWAY_PORT}"}}),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path, resolve_env=True)
+
+        assert config.gateway.port == 18999
+
     def test_save_preserves_templates(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MY_TOKEN", "real-token")
         config_path = tmp_path / "config.json"

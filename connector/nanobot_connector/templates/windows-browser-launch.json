@@ -1,0 +1,11 @@
+{
+  "tools": [
+    {
+      "name": "chrome-launch",
+      "description": "仅启动本机 Google Chrome；不执行网页检索，也不返回网页结果。",
+      "exec": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "approval": "local",
+      "completion": "launch"
+    }
+  ]
+}

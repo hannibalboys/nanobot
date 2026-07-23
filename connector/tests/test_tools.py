@@ -164,6 +164,12 @@ def test_public_schema_hides_internals():
     assert "exec" not in pub
 
 
+def test_launch_completion_is_explicit_and_public():
+    tool = _echo_tool(completion="launch")
+    assert tool.completion == "launch"
+    assert tool.public()["completion"] == "launch"
+
+
 def test_public_schema_marks_sensitive_params():
     tool = _echo_tool(
         params=[

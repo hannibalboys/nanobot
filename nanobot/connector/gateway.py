@@ -193,8 +193,8 @@ class ConnectorGateway:
 
     async def serve_ws(self, connection: Any, device: Any) -> None:
         """Run the connector connection lifecycle on the shared hub."""
-        def _on_seen(node_id: str) -> None:
-            self.devices.touch_last_seen(node_id)
+        def _on_seen(node_id: str, name: str = "") -> None:
+            self.devices.touch_last_seen(node_id, name=name)
 
         await self.hub.serve(
             connection,

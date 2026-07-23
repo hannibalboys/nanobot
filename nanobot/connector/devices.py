@@ -269,12 +269,17 @@ class DeviceStore:
             logger.info("connector: revoked device {}", node_id)
             return True
 
-    def touch_last_seen(self, node_id: str) -> None:
+    def touch_last_seen(self, node_id: str, *, name: str = "") -> None:
         with self._lock:
             device = self._devices.get(node_id)
             if device is None:
                 return
             device.last_seen_at = _iso(_now())
+            # Self-heal: devices paired before the client sent a hostname show as
+            # "unknown"/"" forever; adopt the name from each register frame until
+            # a real one arrives (alias always wins in the UI).
+            if name and device.name.strip().lower() in ("", "unknown"):
+                device.name = name.strip()[:128]
             self._save()
 
     def set_alias(self, node_id: str, alias: str, *, owner_id: str | None = None) -> bool:

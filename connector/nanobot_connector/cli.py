@@ -14,6 +14,25 @@ from nanobot_connector.pairing import PairingError, pair_device
 app = typer.Typer(help="nanobot connector: share local files with a nanobot server.", no_args_is_help=True)
 
 
+@app.command("init")
+def init_connector(
+    home: str | None = typer.Option(None, "--home", help="连接器本机状态目录。"),
+) -> None:
+    """初始化未配对的安全本机配置，不会共享目录或开启高风险能力。"""
+    from pathlib import Path
+
+    from nanobot_connector.bootstrap import initialize_connector
+
+    cfg = initialize_connector(home=Path(home) if home else None)
+    typer.secho(
+        "连接器已初始化，尚未配对且未共享任何目录。"
+        "请在 WebUI 获取配对码后运行 nanobot-connector pair。",
+        fg=typer.colors.GREEN,
+    )
+    if cfg.server:
+        typer.secho("检测到已有本机配对配置，未作替换。", fg=typer.colors.YELLOW)
+
+
 @app.command()
 def pair(
     server: str = typer.Option(..., "--server", help="Server URL, e.g. wss://192.168.90.100:8765"),
@@ -21,6 +40,11 @@ def pair(
     name: str = typer.Option("", "--name", help="Display name for this device."),
     fingerprint: str = typer.Option("", "--fingerprint", help="Pinned server cert sha256 (self-signed)."),
     insecure: bool = typer.Option(False, "--insecure", help="Skip TLS verification (discouraged)."),
+    replace_server: bool = typer.Option(
+        False,
+        "--replace-server",
+        help="Explicitly replace an existing pairing with a different server.",
+    ),
 ) -> None:
     """Redeem a pairing code and store the device token."""
     cfg = ConnectorClientConfig.load()
@@ -34,6 +58,7 @@ def pair(
             name=name,
             fingerprint=fingerprint,
             insecure=insecure,
+            replace_server=replace_server,
         )
     except PairingError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -129,6 +154,7 @@ def tool_add(
     name: str = typer.Option("", "--name", help="Tool name (simple no-argument tool)."),
     executable: str = typer.Option("", "--exec", help="Executable path (simple no-argument tool)."),
     approval: str = typer.Option("local", "--approval", help="auto | webui | local."),
+    completion: str = typer.Option("wait", "--completion", help="wait | launch."),
 ) -> None:
     """Register a tool from a JSON file, or a simple no-argument tool via flags."""
     import json
@@ -144,7 +170,12 @@ def tool_add(
             typer.secho(f"Invalid tool definition: {exc}", fg=typer.colors.RED)
             raise typer.Exit(1) from exc
     elif name and executable:
-        tool = ToolDef(name=name, exec=executable, approval=approval)  # type: ignore[arg-type]
+        tool = ToolDef(  # type: ignore[arg-type]
+            name=name,
+            exec=executable,
+            approval=approval,
+            completion=completion,
+        )
     else:
         typer.secho("Provide --file, or both --name and --exec.", fg=typer.colors.RED)
         raise typer.Exit(1)
@@ -152,7 +183,10 @@ def tool_add(
     registry = ToolRegistry.load()
     registry.add(tool)
     registry.save()
-    typer.secho(f"Registered tool '{tool.name}' (approval={tool.approval}).", fg=typer.colors.GREEN)
+    typer.secho(
+        f"Registered tool '{tool.name}' (approval={tool.approval}, completion={tool.completion}).",
+        fg=typer.colors.GREEN,
+    )
 
 
 @tool_app.command("list")
@@ -197,22 +231,69 @@ def tool_remove(name: str = typer.Argument(..., help="Tool name to remove.")) ->
         typer.secho(f"No such tool: {name}", fg=typer.colors.YELLOW)
 
 
+@tool_app.command("import-template")
+def tool_import_template(
+    name: str = typer.Argument(..., help="随连接器发布的工具档案名称。"),
+    on_conflict: str = typer.Option("fail", "--on-conflict", help="fail | skip | replace"),
+) -> None:
+    """显式导入并预检本机工具档案；导入不会执行工具。"""
+    from nanobot_connector.bootstrap import ConnectorBootstrapError, import_template
+
+    try:
+        imported = import_template(name, on_conflict=on_conflict)  # type: ignore[arg-type]
+    except ConnectorBootstrapError as exc:
+        typer.secho(f"导入失败：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho(
+        f"已导入：{', '.join(imported) if imported else '无（冲突策略跳过）'}。",
+        fg=typer.colors.GREEN,
+    )
+
+
+@tool_app.command("export-template")
+def tool_export_template(
+    name: str = typer.Argument(..., help="要导出的本机工具名称。"),
+    output: str = typer.Option(..., "--output", "-o", help="输出档案路径。"),
+) -> None:
+    """导出不含环境变量值和本机凭据的单工具档案。"""
+    from pathlib import Path
+
+    from nanobot_connector.bootstrap import ConnectorBootstrapError, export_tool_template
+
+    try:
+        export_tool_template(name, Path(output))
+    except ConnectorBootstrapError as exc:
+        typer.secho(f"导出失败：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho("工具档案已导出；提交到 Git 前请人工审阅。", fg=typer.colors.GREEN)
+
+
 @secret_app.command("set")
 def secret_set(secret_id: str = typer.Argument(..., help="Credential id referenced by a tool.")) -> None:
     """Store a credential value on this device (prompted, never echoed)."""
+    from nanobot_connector.credentials import CredentialStoreError
     from nanobot_connector.tools import SecretStore
 
     value = typer.prompt(f"Value for '{secret_id}'", hide_input=True)
-    SecretStore().set(secret_id, value)
+    try:
+        SecretStore().set(secret_id, value)
+    except CredentialStoreError as exc:
+        typer.secho(f"无法保存凭据：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
     typer.secho(f"Stored credential '{secret_id}' on this device only.", fg=typer.colors.GREEN)
 
 
 @secret_app.command("list")
 def secret_list() -> None:
     """List stored credential ids (values are never shown)."""
+    from nanobot_connector.credentials import CredentialStoreError
     from nanobot_connector.tools import SecretStore
 
-    ids = SecretStore().ids()
+    try:
+        ids = SecretStore().ids()
+    except CredentialStoreError as exc:
+        typer.secho(f"无法读取凭据：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
     if not ids:
         typer.echo("(no credentials stored)")
     for sid in ids:
@@ -222,12 +303,41 @@ def secret_list() -> None:
 @secret_app.command("remove")
 def secret_remove(secret_id: str = typer.Argument(..., help="Credential id to delete.")) -> None:
     """Delete a stored credential."""
+    from nanobot_connector.credentials import CredentialStoreError
     from nanobot_connector.tools import SecretStore
 
-    if SecretStore().delete(secret_id):
+    try:
+        removed = SecretStore().delete(secret_id)
+    except CredentialStoreError as exc:
+        typer.secho(f"无法删除凭据：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    if removed:
         typer.secho(f"Removed credential '{secret_id}'.", fg=typer.colors.GREEN)
     else:
         typer.secho(f"No such credential: {secret_id}", fg=typer.colors.YELLOW)
+
+
+@secret_app.command("migrate-legacy")
+def secret_migrate_legacy(
+    delete_after_success: bool = typer.Option(
+        False,
+        "--delete-after-success",
+        help="验证写入系统凭据库后删除旧的明文 secrets.json。",
+    ),
+) -> None:
+    """仅在本机把历史 secrets.json 迁移到操作系统凭据库。"""
+    from nanobot_connector.credentials import CredentialStoreError, SecretStore
+
+    try:
+        migrated = SecretStore().migrate_legacy(delete_after_success=delete_after_success)
+    except CredentialStoreError as exc:
+        typer.secho(f"迁移失败：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    typer.secho(
+        f"已迁移 {len(migrated)} 个凭据。"
+        + ("旧明文文件已删除。" if delete_after_success else "旧明文文件尚未删除，请确认后手动清理。"),
+        fg=typer.colors.GREEN,
+    )
 
 
 arm_app = typer.Typer(help="Time-boxed on-device consent for controlled capabilities.")
@@ -390,6 +500,22 @@ def desktop_status() -> None:
     typer.echo(f"enabled: {'yes' if cfg.desktop_enabled else 'no'}")
     remaining = ArmStore().status().get("desktop", 0)
     typer.echo(f"armed:   {'yes (' + str(remaining // 60) + 'm left)' if remaining else 'no'}")
+
+
+@app.command("doctor")
+def doctor(strict: bool = typer.Option(False, "--strict", help="把不安全设置视为错误。")) -> None:
+    """只读诊断本机连接器、工具和高风险设置。"""
+    from nanobot_connector.bootstrap import doctor_connector
+
+    result = doctor_connector(strict=strict)
+    for message in result.errors:
+        typer.secho(f"错误：{message}", fg=typer.colors.RED)
+    for message in result.warnings:
+        typer.secho(f"提示：{message}", fg=typer.colors.YELLOW)
+    if result.ok:
+        typer.secho("连接器诊断通过。", fg=typer.colors.GREEN)
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 service_app = typer.Typer(help="Install/remove OS autostart.")

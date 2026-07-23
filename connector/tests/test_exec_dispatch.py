@@ -121,6 +121,37 @@ async def test_local_approval_allowed_with_handler():
     assert any(f["type"] == "exec_result" and f["exitCode"] == 0 for f in ws.frames)
 
 
+async def test_launch_completion_returns_without_waiting_for_gui_process():
+    tool = ToolDef.model_validate({
+        "name": "browser",
+        "exec": sys.executable,
+        "argv": ["-c", "import time; time.sleep(3)"],
+        "approval": "auto",
+        "completion": "launch",
+    })
+    client = _client([tool])
+    ws = FakeWS()
+    start = asyncio.get_running_loop().time()
+    await _call(client, ws, "r1", "browser")
+    assert asyncio.get_running_loop().time() - start < 1.0
+    result = [frame for frame in ws.frames if frame["type"] == "exec_result"][-1]
+    assert result["exitCode"] == 0 and result["cancelled"] is False
+
+
+async def test_unexpected_executor_error_returns_rpc_error(monkeypatch):
+    async def fail_execution(*_args, **_kwargs):
+        raise RuntimeError("simulated executor failure")
+
+    monkeypatch.setattr("nanobot_connector.client.run_execution", fail_execution)
+    client = _client([_print_tool()])
+    ws = FakeWS()
+    await _call(client, ws, "r1", "printer")
+    response = ws.frames[-1]
+    assert response["type"] == "rpc_response" and response["ok"] is False
+    assert response["error"]["code"] == "internal"
+    assert not any(frame["type"] == "exec_result" for frame in ws.frames)
+
+
 async def test_cancel_terminates_running_exec():
     client = _client([_sleep_tool()])
     ws = FakeWS()

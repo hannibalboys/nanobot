@@ -225,6 +225,9 @@ app = typer.Typer(
     help=f"{__logo__} nanobot - Personal AI Assistant",
     no_args_is_help=True,
 )
+from nanobot.cli.config_commands import create_config_app  # noqa: E402
+
+app.add_typer(create_config_app(), name="config")
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}

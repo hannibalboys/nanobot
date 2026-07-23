@@ -100,13 +100,31 @@ def build_gateway_services(
     )
     connector = None
     if connector_config is not None and getattr(connector_config, "enabled", False):
-        from nanobot.connector.gateway import ConnectorGateway
+        try:
+            from nanobot.connector.gateway import ConnectorGateway
 
-        connector = ConnectorGateway(
-            connector_config,
-            workspace_path=workspace_path,
-            ws_config=config,
-            tokens=tokens,
+            connector = ConnectorGateway(
+                connector_config,
+                workspace_path=workspace_path,
+                ws_config=config,
+                tokens=tokens,
+            )
+            from nanobot.connector.exec import default_execution_coordinator
+
+            logger.info(
+                "connector gateway built: allow_exec={} allow_desktop={} coordinator={}",
+                getattr(connector_config, "allow_exec", False),
+                getattr(connector_config, "allow_desktop_control", False),
+                "registered" if default_execution_coordinator() is not None else "MISSING",
+            )
+        except Exception:
+            logger.exception("connector gateway failed to build; exec/desktop tools disabled")
+            connector = None
+    else:
+        logger.warning(
+            "connector gateway not built: connector_config={} enabled={}",
+            connector_config is not None,
+            getattr(connector_config, "enabled", None),
         )
     return GatewayServices(
         http=http,

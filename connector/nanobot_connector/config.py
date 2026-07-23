@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
+
+CONNECTOR_CONFIG_VERSION = 1
 
 
 def config_dir() -> Path:
@@ -26,6 +29,7 @@ class ConnectorClientConfig(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+    config_version: int = CONNECTOR_CONFIG_VERSION
     server: str = ""  # wss://host:port
     device_token: str = ""
     node_id: str = ""
@@ -48,12 +52,23 @@ class ConnectorClientConfig(BaseModel):
     def save(self) -> None:
         path = config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(self.model_dump(by_alias=True), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(self.model_dump(by_alias=True), handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @classmethod
     def load(cls) -> "ConnectorClientConfig":
@@ -61,4 +76,18 @@ class ConnectorClientConfig(BaseModel):
             data = json.loads(config_path().read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return cls()
+        if not isinstance(data, dict):
+            raise ValueError("connector config root must be an object")
+        version = data.get("configVersion", data.get("config_version", 0))
+        try:
+            version = int(version)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("connector configVersion must be an integer") from exc
+        if version > CONNECTOR_CONFIG_VERSION:
+            raise ValueError(
+                f"connector configVersion {version} is newer than this client "
+                f"({CONNECTOR_CONFIG_VERSION})"
+            )
+        data.pop("config_version", None)
+        data["configVersion"] = CONNECTOR_CONFIG_VERSION
         return cls.model_validate(data)

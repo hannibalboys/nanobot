@@ -173,7 +173,7 @@ class ConnectorHub:
                 await _close_connection(old.connection)
             self._nodes[node_id] = node
         if on_seen:
-            on_seen(node_id)
+            on_seen(node_id, name=node.info.name)
         logger.info("connector: node {} online ({})", node_id, node.info.name)
         try:
             async for raw in connection:
