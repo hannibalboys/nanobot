@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from nanobot_connector import __version__
 from nanobot_connector.client import ConnectorClient, machine_fingerprint
 from nanobot_connector.config import (
     ConnectorClientConfig,
@@ -79,6 +80,12 @@ def test_malformed_config_is_not_silently_replaced():
 def test_machine_fingerprint_stable():
     assert machine_fingerprint() == machine_fingerprint()
     assert len(machine_fingerprint()) == 32
+
+
+def test_runtime_version_matches_the_packaged_distribution():
+    from importlib.metadata import version
+
+    assert __version__ == version("nanobot-connector")
 
 
 def test_ws_url_includes_token():

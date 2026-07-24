@@ -88,3 +88,11 @@ def test_strict_doctor_rejects_insecure_transport() -> None:
 
     assert not result.ok
     assert any("insecure" in message for message in result.errors)
+
+
+def test_doctor_warns_when_a_persistent_gui_waits_for_exit() -> None:
+    ToolRegistry([ToolDef(name="qq", exec="QQ.exe", completion="wait")]).save()
+
+    result = doctor_connector()
+
+    assert any("completion=wait" in message and "qq" in message for message in result.warnings)

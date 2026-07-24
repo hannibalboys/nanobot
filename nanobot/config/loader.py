@@ -38,7 +38,9 @@ def restrict_file_permissions(path: Path) -> None:
         system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
         admins_sid = win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid, None)
         dacl = win32security.ACL()
-        user_access = ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE
+        user_access = (
+            ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE | ntsecuritycon.DELETE
+        )
         dacl.AddAccessAllowedAce(win32security.ACL_REVISION, user_access, user_sid)
         dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, system_sid)
         dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, admins_sid)

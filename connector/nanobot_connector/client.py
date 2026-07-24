@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import platform
 import random
 import socket
@@ -45,6 +46,11 @@ _BACKOFF_MAX = 60.0
 
 # Local-approval decision for an ``approval=local`` tool: returns True to allow.
 LocalApprovalHook = Callable[[ToolDef, dict], Awaitable[bool]]
+
+# Live arm-window lookup for a category ("exec" | "mcp" | "desktop"): returns the
+# remaining seconds, 0 when not armed. Lets tools.list/mcp.list report whether an
+# approval=local tool would pass the on-device consent check *right now*.
+ArmedRemainingHook = Callable[[str], int]
 
 
 class RevokedError(Exception):
@@ -110,6 +116,7 @@ class ConnectorClient:
         *,
         registry: ToolRegistry | None = None,
         on_local_approval: LocalApprovalHook | None = None,
+        armed_remaining: ArmedRemainingHook | None = None,
         mcp_bridge: McpBridge | None = None,
         desktop: DesktopController | None = None,
     ):
@@ -118,6 +125,7 @@ class ConnectorClient:
         self.files = FileService(self.roots)
         self.registry = registry if registry is not None else ToolRegistry.load()
         self._on_local_approval = on_local_approval
+        self._armed_remaining = armed_remaining
         # MCP bridge: present only if the owner registered any local MCP servers.
         self.mcp_bridge = mcp_bridge if mcp_bridge is not None else _load_mcp_bridge()
         # Desktop controller: present only if the owner opted into desktop control.
@@ -254,7 +262,7 @@ class ConnectorClient:
                 task.add_done_callback(self._fetch_tasks.discard)
                 return
             elif method == "tools.list":
-                result = {"tools": self.registry.list_public()}
+                result = {"tools": self._annotate_armed(self.registry.list_public(), "exec")}
             elif method == "tools.call":
                 # Background task: streams exec_output and ends with exec_result,
                 # while the read loop stays free to receive tools.cancel.
@@ -272,7 +280,7 @@ class ConnectorClient:
             elif method == "mcp.list":
                 if self.mcp_bridge is not None:
                     result = {
-                        "tools": self.mcp_bridge.list_tools(),
+                        "tools": self._annotate_armed(self.mcp_bridge.list_tools(), "mcp"),
                         "servers": self.mcp_bridge.server_health(),
                     }
                 else:
@@ -495,6 +503,33 @@ class ConnectorClient:
             return
         await ws.send(json.dumps(proto.rpc_response(rpc_id, result), ensure_ascii=False))
 
+    def _annotate_armed(self, tools: list[dict], category: str) -> list[dict]:
+        """Stamp each ``approval=local`` tool with the owner's live arm window.
+
+        ``armedRemainingS`` > 0 means a call passes the on-device consent check
+        right now; 0 means it would be refused. Tools with other approval
+        policies — and every tool when no arm store is wired — carry no field,
+        matching older connectors (absent == status unknown).
+        """
+        if self._armed_remaining is None:
+            return tools
+        try:
+            raw_remaining = self._armed_remaining(category)
+            if isinstance(raw_remaining, bool) or not isinstance(raw_remaining, (int, float)):
+                raise ValueError("授权状态返回了非数值剩余时间")
+            if not math.isfinite(raw_remaining):
+                raise ValueError("授权状态返回了无效剩余时间")
+            remaining = max(0, math.ceil(raw_remaining))
+        except Exception as exc:  # noqa: BLE001 - display metadata must not break an RPC
+            log_event(f"无法读取本机授权状态；工具列表将显示为状态未知：{exc}", "warn")
+            return tools
+        return [
+            {**tool, "armedRemainingS": remaining}
+            if isinstance(tool, dict) and tool.get("approval") == "local"
+            else tool
+            for tool in tools
+        ]
+
     async def _confirm_local(self, tool: ToolDef, args: dict) -> bool:
         """Ask the device owner to approve an ``approval=local`` tool.
 
@@ -531,14 +566,21 @@ def build_daemon_client(cfg: ConnectorClientConfig) -> "ConnectorClient":
 
     arm = ArmStore()
 
+    def is_armed_safely(category: str) -> bool:
+        try:
+            return arm.is_armed(category)
+        except Exception as exc:  # noqa: BLE001 - corrupted local state must fail closed
+            log_event(f"无法读取本机授权状态，已拒绝 {category} 操作：{exc}", "warn")
+            return False
+
     async def approve_exec(tool, args):
-        return arm.is_armed("exec")
+        return is_armed_safely("exec")
 
     async def approve_mcp(server, tool, args):
-        return arm.is_armed("mcp")
+        return is_armed_safely("mcp")
 
     async def authorize_desktop(operator, goal):
-        return arm.is_armed("desktop")
+        return is_armed_safely("desktop")
 
     def indicator(active: bool) -> None:
         log_event("● 屏幕正在被远程捕获（桌面控制进行中）" if active
@@ -554,7 +596,8 @@ def build_daemon_client(cfg: ConnectorClientConfig) -> "ConnectorClient":
             on_indicator=indicator,
         )
     return ConnectorClient(
-        cfg, on_local_approval=approve_exec, mcp_bridge=bridge, desktop=desktop
+        cfg, on_local_approval=approve_exec, armed_remaining=arm.remaining,
+        mcp_bridge=bridge, desktop=desktop,
     )
 
 

@@ -13,6 +13,7 @@ device visibility is scoped by owner (task 4.3).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,10 @@ _ERROR_HINTS = {
         "to grant access."
     ),
     proto.ERROR_APPROVAL_DENIED: (
-        "The execution was not approved by the device owner."
+        "The execution was not approved by the device owner. For approval=local "
+        "tools this means the owner's arm window is closed — ask them to arm the "
+        "capability on their machine (e.g. `nanobot-connector arm exec --for 30m`), "
+        "then retry."
     ),
     proto.ERROR_APPROVAL_TIMEOUT: (
         "The approval request timed out and was declined. You may try again."
@@ -350,6 +354,49 @@ class ConnectorFetchFileTool(_ConnectorTool):
 # --- controlled execution (add-connector-local-tools) --------------------
 
 
+def _local_approval_state(tool: dict, *, category: str) -> dict:
+    """Derived live-consent field for an ``approval=local`` tool (empty otherwise).
+
+    The device stamps ``armedRemainingS`` (seconds left on the owner's arm
+    window) onto local-approval tools in tools.list/mcp.list; older connectors
+    omit it. Surfacing a ready-made state string keeps the LLM from having to
+    interpret raw seconds — and from claiming a tool "needs approval" when the
+    owner has in fact already armed it.
+    """
+    if tool.get("approval") != "local":
+        return {}
+    remaining = tool.get("armedRemainingS")
+    # bool is a subclass of int; exclude it and any non-numeric wire junk so a
+    # malformed device response can never crash the listing.
+    if (
+        not isinstance(remaining, (int, float))
+        or isinstance(remaining, bool)
+        or not math.isfinite(remaining)
+    ):
+        state = "unknown (device connector did not provide a valid live arm status)"
+    elif remaining > 0:
+        minutes = math.ceil(remaining / 60)
+        state = f"armed ({minutes}m remaining) — calls will pass the on-device consent check"
+    else:
+        state = (
+            "not armed — calls will be refused until the device owner arms this "
+            f"capability on their machine (e.g. `nanobot-connector arm {category} --for 30m`)"
+        )
+    return {"localApprovalState": state}
+
+
+def _completion_safety(tool: dict) -> dict:
+    """Give the LLM an explicit guardrail for persistent GUI applications."""
+    if tool.get("completion", "wait") != "wait":
+        return {}
+    return {
+        "completionSafety": (
+            "wait blocks this call until the local process exits. Do not use it for persistent "
+            "GUI applications such as QQ or a browser; ask the owner to set completion=launch first."
+        )
+    }
+
+
 class _ConnectorExecTool(_ConnectorTool):
     """Base for exec tools: gated on both ``enabled`` and ``allowExec``, and
     routed through the shared :class:`ExecutionCoordinator` (grants, approvals,
@@ -456,6 +503,8 @@ class ConnectorListToolsTool(_ConnectorExecTool):
                 # Older connector clients do not send completion; their historic
                 # behavior is always to wait for the launched process to exit.
                 "completion": tool.get("completion", "wait"),
+                **_local_approval_state(tool, category="exec"),
+                **_completion_safety(tool),
             }
             for tool in tools
             if isinstance(tool, dict)
@@ -464,7 +513,7 @@ class ConnectorListToolsTool(_ConnectorExecTool):
             {
                 "tools": normalized_tools,
                 "approvalSemantics": {
-                    "local": "本机限时预授权检查；未授权会立即拒绝，不会等待网页端按钮。",
+                    "local": "本机限时预授权检查；未授权会立即拒绝，不会等待网页端按钮。localApprovalState 是该工具的实时授权状态：armed=主人已在设备上授权（含剩余时间），可直接调用；not armed=会被立即拒绝，需主人在设备上 arm；unknown=连接器版本过旧不上报。",
                     "webui": "服务端会等待 WebUI 用户逐次批准，直到批准或超时。",
                     "auto": "不需要额外审批，仍受既有授权和限流约束。",
                 },
@@ -492,7 +541,9 @@ class ConnectorCallToolTool(_ConnectorExecTool):
     description = (
         "Run a registered tool on a paired local device and return its output. The "
         "device owner must have registered and authorized the tool; some tools "
-        "require the owner to approve each run. Discover tools with connector_list_tools."
+        "require the owner to approve each run. Discover tools with connector_list_tools. "
+        "Never call a completion=wait tool for a persistent GUI application such as QQ or a "
+        "browser: ask the owner to configure completion=launch first."
     )
 
     async def execute(self, node_id: str, tool: str, args: dict[str, Any] | None = None, **kwargs: Any) -> Any:
@@ -547,7 +598,8 @@ class ConnectorListMcpToolsTool(_ConnectorMcpTool):
     name = "connector_list_mcp_tools"
     description = (
         "List tools from the MCP servers a paired device bridges to the server. "
-        "Returns each tool's server, name, description, and approval policy. Use "
+        "Returns each tool's server, name, description, and approval policy "
+        "(local-approval tools also carry a live localApprovalState). Use "
         "before connector_call_mcp_tool."
     )
 
@@ -565,7 +617,12 @@ class ConnectorListMcpToolsTool(_ConnectorMcpTool):
                 "This device bridges no MCP tools. Ask the user to register a local "
                 "MCP server with `nanobot-connector mcp add` on that computer."
             )
-        return json.dumps({"tools": tools}, ensure_ascii=False)
+        normalized = [
+            {**tool, **_local_approval_state(tool, category="mcp")}
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
+        return json.dumps({"tools": normalized}, ensure_ascii=False)
 
 
 @tool_parameters({

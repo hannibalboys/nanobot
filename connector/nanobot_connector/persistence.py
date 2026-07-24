@@ -39,7 +39,7 @@ def _restrict_file_permissions(path: Path, mode: int) -> None:
         dacl = win32security.ACL()
         dacl.AddAccessAllowedAce(
             win32security.ACL_REVISION,
-            ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE,
+            ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE | ntsecuritycon.DELETE,
             user_sid,
         )
         dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, system_sid)

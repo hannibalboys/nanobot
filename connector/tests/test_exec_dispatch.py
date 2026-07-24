@@ -68,6 +68,39 @@ async def test_tools_list_returns_public_schema():
     assert names == ["printer"]
 
 
+async def test_tools_list_annotates_local_tools_with_live_arm_window():
+    client = _client(
+        [_print_tool(approval="local"), _sleep_tool(approval="auto")],
+        armed_remaining=lambda category: 900 if category == "exec" else 0,
+    )
+    ws = FakeWS()
+    await client._handle_rpc(ws, {"type": "rpc_request", "id": "1", "method": "tools.list", "params": {}})
+    tools = {t["name"]: t for t in ws.frames[-1]["result"]["tools"]}
+    # approval=local tools carry the live arm window; other policies do not
+    assert tools["printer"]["armedRemainingS"] == 900
+    assert "armedRemainingS" not in tools["sleeper"]
+
+
+async def test_tools_list_survives_an_arm_status_read_failure():
+    def unavailable(_category: str) -> int:
+        raise OSError("arm state unreadable")
+
+    client = _client([_print_tool(approval="local")], armed_remaining=unavailable)
+    ws = FakeWS()
+    await client._handle_rpc(ws, {"type": "rpc_request", "id": "1", "method": "tools.list", "params": {}})
+
+    tool = ws.frames[-1]["result"]["tools"][0]
+    assert tool["name"] == "printer"
+    assert "armedRemainingS" not in tool
+
+
+async def test_tools_list_without_arm_hook_reports_no_window():
+    client = _client([_print_tool(approval="local")])  # no armed_remaining hook
+    ws = FakeWS()
+    await client._handle_rpc(ws, {"type": "rpc_request", "id": "1", "method": "tools.list", "params": {}})
+    assert "armedRemainingS" not in ws.frames[-1]["result"]["tools"][0]
+
+
 async def test_call_auto_streams_output_then_result():
     client = _client([_print_tool("hi there")])
     ws = FakeWS()

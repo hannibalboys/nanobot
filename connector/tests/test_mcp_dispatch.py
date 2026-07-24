@@ -114,6 +114,29 @@ async def test_client_mcp_list():
     await bridge.stop()
 
 
+async def test_client_mcp_list_annotates_local_tools_with_live_arm_window():
+    bridge = McpBridge(
+        McpRegistry([McpServerDef(name="fs", command="x", approval="local")]),
+        session_factory=_factory(FakeSession([FakeTool("search")])),
+    )
+    await bridge.start()
+    for _ in range(100):
+        if bridge.list_tools():
+            break
+        await asyncio.sleep(0.01)
+    cfg = ConnectorClientConfig(server="wss://h/connector/ws", device_token="t")
+    client = ConnectorClient(
+        cfg, mcp_bridge=bridge,
+        armed_remaining=lambda category: 600 if category == "mcp" else 0,
+    )
+    ws = FakeWS()
+    await client._handle_rpc(ws, {"type": "rpc_request", "id": "1", "method": "mcp.list", "params": {}})
+    tool = ws.frames[-1]["result"]["tools"][0]
+    assert tool["approval"] == "local"
+    assert tool["armedRemainingS"] == 600
+    await bridge.stop()
+
+
 async def test_client_mcp_call_forwards():
     bridge = await _bridge_with(FakeSession([FakeTool("search")], call_text="found it"))
     client = _client(bridge)

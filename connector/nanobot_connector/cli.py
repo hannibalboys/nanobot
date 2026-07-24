@@ -340,24 +340,31 @@ def secret_migrate_legacy(
     )
 
 
-arm_app = typer.Typer(help="Time-boxed on-device consent for controlled capabilities.")
-app.add_typer(arm_app, name="arm")
-
-
-@arm_app.callback(invoke_without_command=True)
-def arm_root(
+@app.command("arm", context_settings={"allow_extra_args": True})
+def arm_command(
     ctx: typer.Context,
-    category: str = typer.Argument(None, help="exec | mcp | desktop"),
+    category: str | None = typer.Argument(None, help="exec | mcp | desktop | status | disarm"),
     duration: str = typer.Option("30m", "--for", help="Duration, e.g. 30m, 2h, 90s."),
 ) -> None:
     """Arm a capability for a bounded window (owner consent for `local`/desktop).
 
-    Example: `nanobot-connector arm desktop --for 30m`
+    Examples: `nanobot-connector arm exec --for 30m`,
+    `nanobot-connector arm status`, `nanobot-connector arm disarm exec`.
     """
-    if ctx.invoked_subcommand is not None:
-        return
     from nanobot_connector.arm import CATEGORIES, ArmStore, parse_duration
 
+    if category == "status":
+        if ctx.args:
+            typer.secho(f"Unexpected argument(s): {' '.join(ctx.args)}", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        _arm_status()
+        return
+    if category == "disarm":
+        if len(ctx.args) > 1:
+            typer.secho(f"Unexpected argument(s): {' '.join(ctx.args[1:])}", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        _arm_disarm(ctx.args[0] if ctx.args else "all")
+        return
     if category is None:
         typer.echo("Usage: nanobot-connector arm <exec|mcp|desktop> --for 30m")
         typer.echo("       nanobot-connector arm status | disarm [category|all]")
@@ -365,12 +372,21 @@ def arm_root(
     if category not in CATEGORIES:
         typer.secho(f"Unknown category '{category}'. One of: {', '.join(CATEGORIES)}", fg=typer.colors.RED)
         raise typer.Exit(1)
+    if ctx.args:
+        typer.secho(f"Unexpected argument(s): {' '.join(ctx.args)}", fg=typer.colors.RED)
+        raise typer.Exit(1)
     try:
         ttl = parse_duration(duration)
     except ValueError as exc:
         typer.secho(f"Invalid duration: {duration}", fg=typer.colors.RED)
         raise typer.Exit(1) from exc
-    ArmStore().arm(category, ttl)
+    from nanobot_connector.persistence import LocalStateError
+
+    try:
+        ArmStore().arm(category, ttl)
+    except LocalStateError as exc:
+        typer.secho(f"无法更新本机授权状态：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
     mins = ttl // 60
     typer.secho(
         f"Armed '{category}' for {mins} min {ttl % 60}s. The daemon may now run "
@@ -379,12 +395,16 @@ def arm_root(
     )
 
 
-@arm_app.command("status")
-def arm_status() -> None:
+def _arm_status() -> None:
     """Show currently-armed capabilities and remaining time."""
     from nanobot_connector.arm import ArmStore
+    from nanobot_connector.persistence import LocalStateError
 
-    armed = ArmStore().status()
+    try:
+        armed = ArmStore().status()
+    except LocalStateError as exc:
+        typer.secho(f"无法读取本机授权状态：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
     if not armed:
         typer.echo("(nothing armed)")
         return
@@ -392,12 +412,23 @@ def arm_status() -> None:
         typer.echo(f"  {cat}: {remaining // 60}m {remaining % 60}s remaining")
 
 
-@arm_app.command("disarm")
-def arm_disarm(category: str = typer.Argument("all", help="exec | mcp | desktop | all")) -> None:
+def _arm_disarm(category: str) -> None:
     """Immediately revoke a prior arm (all by default)."""
-    from nanobot_connector.arm import ArmStore
+    from nanobot_connector.arm import CATEGORIES, ArmStore
 
-    ArmStore().disarm(category)
+    if category not in (*CATEGORIES, "all"):
+        typer.secho(
+            f"Unknown category '{category}'. One of: {', '.join(CATEGORIES)}, all",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    from nanobot_connector.persistence import LocalStateError
+
+    try:
+        ArmStore().disarm(category)
+    except LocalStateError as exc:
+        typer.secho(f"无法更新本机授权状态：{exc}", fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
     typer.secho(f"Disarmed '{category}'.", fg=typer.colors.GREEN)
 
 

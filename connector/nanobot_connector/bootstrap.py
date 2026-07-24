@@ -20,6 +20,16 @@ from nanobot_connector.persistence import (
 from nanobot_connector.tools import ToolDef, ToolRegistry
 
 ConflictPolicy = Literal["fail", "skip", "replace"]
+_PERSISTENT_GUI_MARKERS = (
+    "qq",
+    "chrome",
+    "chromium",
+    "msedge",
+    "firefox",
+    "browser",
+    "wechat",
+    "weixin",
+)
 
 
 class ConnectorBootstrapError(ValueError):
@@ -72,6 +82,12 @@ def _load_template(name: str) -> list[ToolDef]:
 def _executable_available(executable: str) -> bool:
     path = Path(executable).expanduser()
     return path.is_file() if path.is_absolute() else shutil.which(executable) is not None
+
+
+def _looks_like_persistent_gui(tool: ToolDef) -> bool:
+    """Identify common chat/browser launchers that must not use ``completion=wait``."""
+    identity = f"{tool.name} {Path(tool.exec).name}".lower()
+    return any(marker in identity for marker in _PERSISTENT_GUI_MARKERS)
 
 
 def initialize_connector(*, home: Path | None = None) -> ConnectorClientConfig:
@@ -158,6 +174,17 @@ def doctor_connector(*, strict: bool = False) -> ConnectorDoctorResult:
     if missing_tools:
         message = f"工具可执行文件缺失：{', '.join(missing_tools)}"
         (errors if strict else warnings).append(message)
+    persistent_wait_tools = [
+        tool.name
+        for tool in tools
+        if tool.completion == "wait" and _looks_like_persistent_gui(tool)
+    ]
+    if persistent_wait_tools:
+        warnings.append(
+            "常驻 GUI 工具仍配置为 completion=wait，会让远程调用一直等待程序退出："
+            f"{', '.join(persistent_wait_tools)}。请在连接器 GUI 中切换为“启动后返回”，"
+            "或重新注册时使用 --completion launch。"
+        )
     if cfg.insecure:
         message = "当前连接器启用了 --insecure，生产环境不得使用"
         (errors if strict else warnings).append(message)

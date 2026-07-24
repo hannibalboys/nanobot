@@ -244,7 +244,39 @@ async def test_list_tools_returns_approval_and_completion_semantics(tmp_path):
     tool = _exec_tool(ConnectorListToolsTool, coord, tmp_path)
     payload = json.loads(str(await tool.execute(node_id="dev-1")))
     assert payload["tools"][0]["completion"] == "wait"
+    assert "completionSafety" in payload["tools"][0]
     assert "本机限时预授权" in payload["approvalSemantics"]["local"]
+
+
+async def test_list_tools_local_tool_shows_live_arm_state(tmp_path):
+    coord = FakeCoordinator(tools=[
+        {"name": "qq", "approval": "local", "params": [], "armedRemainingS": 1530},
+        {"name": "google", "approval": "local", "params": [], "armedRemainingS": 0},
+        {"name": "legacy", "approval": "local", "params": []},
+        {"name": "junk", "approval": "local", "params": [], "armedRemainingS": "900"},
+        {"name": "auto_tool", "approval": "auto", "params": []},
+    ])
+    tool = _exec_tool(ConnectorListToolsTool, coord, tmp_path)
+    payload = json.loads(str(await tool.execute(node_id="dev-1")))
+    tools = {t["name"]: t for t in payload["tools"]}
+    assert tools["qq"]["localApprovalState"].startswith("armed (26m remaining)")
+    assert "not armed" in tools["google"]["localApprovalState"]
+    assert "arm exec" in tools["google"]["localApprovalState"]
+    assert "unknown" in tools["legacy"]["localApprovalState"]
+    # malformed wire data degrades to unknown instead of crashing
+    assert "unknown" in tools["junk"]["localApprovalState"]
+    # non-local policies carry no state field
+    assert "localApprovalState" not in tools["auto_tool"]
+
+
+async def test_list_tools_launch_completion_has_no_persistent_gui_warning(tmp_path):
+    coord = FakeCoordinator(tools=[
+        {"name": "qq", "approval": "local", "params": [], "completion": "launch"},
+    ])
+    tool = _exec_tool(ConnectorListToolsTool, coord, tmp_path)
+    payload = json.loads(str(await tool.execute(node_id="dev-1")))
+
+    assert "completionSafety" not in payload["tools"][0]
 
 
 async def test_list_tools_empty_message(tmp_path):
@@ -339,6 +371,18 @@ async def test_list_mcp_tools_returns_schema(tmp_path):
     tool = _mcp_tool(ConnectorListMcpToolsTool, coord, tmp_path)
     out = await tool.execute(node_id="dev-1")
     assert "search" in str(out)
+
+
+async def test_list_mcp_tools_local_tool_shows_live_arm_state(tmp_path):
+    coord = FakeCoordinator(mcp_tools=[
+        {"server": "fs", "name": "search", "approval": "local", "armedRemainingS": 600},
+        {"server": "fs", "name": "legacy", "approval": "local"},
+    ])
+    tool = _mcp_tool(ConnectorListMcpToolsTool, coord, tmp_path)
+    payload = json.loads(str(await tool.execute(node_id="dev-1")))
+    tools = {t["name"]: t for t in payload["tools"]}
+    assert tools["search"]["localApprovalState"].startswith("armed (10m remaining)")
+    assert "unknown" in tools["legacy"]["localApprovalState"]
 
 
 async def test_list_mcp_tools_empty_message(tmp_path):

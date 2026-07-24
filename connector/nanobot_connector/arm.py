@@ -15,11 +15,12 @@ Entries carry an absolute expiry epoch; a missing or elapsed entry means *not ar
 from __future__ import annotations
 
 import json
-import os
+import math
 import time
 from pathlib import Path
 
 from nanobot_connector.config import config_dir
+from nanobot_connector.persistence import LocalStateError, locked_file, write_json_atomic
 
 CATEGORIES = ("exec", "mcp", "desktop")
 
@@ -31,56 +32,70 @@ class ArmStore:
     def _load(self) -> dict[str, float]:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             return {}
+        except (OSError, ValueError) as exc:
+            raise LocalStateError(f"本机授权状态文件不是有效 JSON：{self._path}") from exc
+        if not isinstance(data, dict):
+            raise LocalStateError(f"本机授权状态文件根节点必须是对象：{self._path}")
         out: dict[str, float] = {}
-        if isinstance(data, dict):
-            for k, v in data.items():
-                try:
-                    out[str(k)] = float(v)
-                except (TypeError, ValueError):
-                    continue
+        for k, v in data.items():
+            try:
+                expiry = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(expiry):
+                out[str(k)] = expiry
         return out
 
+    def _save_unlocked(self, data: dict[str, float]) -> None:
+        write_json_atomic(self._path, data)
+
     def _save(self, data: dict[str, float]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
-        try:
-            os.chmod(self._path, 0o600)
-        except OSError:
-            pass  # best-effort on platforms without POSIX perms
+        """Persist a test/admin supplied snapshot while respecting the local lock."""
+        with locked_file(self._path):
+            self._save_unlocked(data)
 
     def arm(self, category: str, ttl_s: int) -> float:
         """Arm *category* for ``ttl_s`` seconds. Returns the expiry epoch."""
         if category not in CATEGORIES:
             raise ValueError(f"unknown category: {category}")
-        data = self._load()
-        expiry = time.time() + max(1, ttl_s)
-        data[category] = expiry
-        self._save(data)
+        with locked_file(self._path):
+            data = self._load()
+            expiry = time.time() + max(1, ttl_s)
+            data[category] = expiry
+            self._save_unlocked(data)
         return expiry
 
     def disarm(self, category: str) -> None:
         """Disarm one category, or all when ``category == 'all'``."""
-        if category == "all":
-            self._save({})
-            return
-        data = self._load()
-        if data.pop(category, None) is not None:
-            self._save(data)
+        with locked_file(self._path):
+            if category == "all":
+                self._save_unlocked({})
+                return
+            data = self._load()
+            if data.pop(category, None) is not None:
+                self._save_unlocked(data)
 
     def is_armed(self, category: str) -> bool:
         expiry = self._load().get(category)
         return expiry is not None and time.time() < expiry
+
+    def remaining(self, category: str) -> int:
+        """Seconds left on *category*'s arm window; 0 when not armed."""
+        expiry = self._load().get(category)
+        if expiry is None:
+            return 0
+        # ``int`` truncates a still-valid 0.1s window to zero, making the
+        # display claim "not armed" while the call path would still accept it.
+        return max(0, math.ceil(expiry - time.time()))
 
     def status(self) -> dict[str, int]:
         """Category -> remaining seconds (only currently-armed categories)."""
         now = time.time()
         out: dict[str, int] = {}
         for cat, expiry in self._load().items():
-            remaining = int(expiry - now)
+            remaining = math.ceil(expiry - now)
             if remaining > 0:
                 out[cat] = remaining
         return out
