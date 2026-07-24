@@ -12,6 +12,7 @@ dependencies = [
     "websockets>=16.0,<17.0",
     "pydantic>=2.12.0,<3.0.0",
     "typer>=0.20.0,<1.0.0",
+    "filelock>=3.25.2,<4.0.0",
     "keyring>=25.0.0,<26.0.0",
     # MCP client for the local MCP proxy bridge (add-connector-mcp-proxy). Only
     # exercised when the owner registers local MCP servers; imported lazily.

@@ -13,6 +13,7 @@ from nanobot_connector.bootstrap import (
     initialize_connector,
 )
 from nanobot_connector.config import ConnectorClientConfig, config_dir, config_path
+from nanobot_connector.persistence import file_permission_issue
 from nanobot_connector.tools import ToolDef, ToolRegistry
 
 
@@ -29,6 +30,8 @@ def test_init_creates_safe_unpaired_state() -> None:
     assert cfg.device_token == ""
     assert cfg.roots == []
     assert cfg.desktop_enabled is False
+    assert file_permission_issue(config_path()) is None
+    assert file_permission_issue(config_dir() / "tools.json") is None
 
 
 def test_import_template_preflights_then_writes_atomically(tmp_path, monkeypatch) -> None:

@@ -48,7 +48,10 @@ def test_explicit_legacy_migration_is_local_and_opt_in(monkeypatch) -> None:
     backend = _FakeKeyring()
     monkeypatch.setattr(store, "_keyring", lambda: backend)
 
-    assert store.migrate_legacy(delete_after_success=True) == ["legacy"]
+    result = store.migrate_legacy(delete_after_success=True)
+
+    assert result.migrated_ids == ("legacy",)
+    assert result.legacy_deleted is True
     assert store.get("legacy") == "value"
     assert not legacy_path.exists()
 
@@ -61,3 +64,34 @@ def test_file_backend_is_explicit_legacy_only(tmp_path) -> None:
     assert store.secure_backend_available() is False
     with pytest.raises(CredentialStoreError):
         store.migrate_legacy()
+
+
+def test_failed_index_write_is_recovered_before_the_next_operation(monkeypatch) -> None:
+    store = SecretStore()
+    backend = _FakeKeyring()
+    monkeypatch.setattr(store, "_keyring", lambda: backend)
+    original_save = store._save_index
+
+    def fail_once(_ids: set[str]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_save_index", fail_once)
+    with pytest.raises(CredentialStoreError, match="自动恢复"):
+        store.set("api", "private-value")
+
+    assert store.get("api") == "private-value"
+    assert (config_dir() / "secrets.pending.json").exists()
+
+    monkeypatch.setattr(store, "_save_index", original_save)
+    assert store.ids() == ["api"]
+    assert not (config_dir() / "secrets.pending.json").exists()
+
+
+def test_integrity_check_reports_stale_index(monkeypatch) -> None:
+    store = SecretStore()
+    backend = _FakeKeyring()
+    monkeypatch.setattr(store, "_keyring", lambda: backend)
+    store.set("api", "private-value")
+    backend.values.clear()
+
+    assert store.integrity_issues() == ["凭据索引引用了不存在的凭据：api"]

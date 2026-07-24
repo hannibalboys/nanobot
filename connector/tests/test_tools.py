@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from nanobot_connector.persistence import LocalStateConflictError, LocalStateError
 from nanobot_connector.tools import (
     InvalidArgsError,
     MissingCredentialError,
@@ -153,6 +154,20 @@ def test_persistence_roundtrip(tmp_path):
     assert [t.name for t in reloaded.list()] == ["say"]
 
 
+def test_save_rejects_stale_registry_snapshot(tmp_path):
+    path = tmp_path / "tools.json"
+    first = ToolRegistry.load(path=path)
+    second = ToolRegistry.load(path=path)
+
+    first.add(_echo_tool())
+    first.save()
+    second.add(ToolDef(name="other", exec="echo"))
+
+    with pytest.raises(LocalStateConflictError, match="其他连接器进程"):
+        second.save()
+    assert [tool.name for tool in ToolRegistry.load(path=path).list()] == ["say"]
+
+
 def test_public_schema_hides_internals():
     tool = _echo_tool(env={"FOO": "bar"}, secrets={"TOK": "id"})
     pub = tool.public()
@@ -188,3 +203,12 @@ def test_malformed_entries_skipped_on_load(tmp_path):
                     encoding="utf-8")
     reg = ToolRegistry.load(path=path)
     assert [t.name for t in reg.list()] == ["say"]
+
+
+def test_malformed_registry_document_is_rejected_without_overwrite(tmp_path):
+    path = tmp_path / "tools.json"
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(LocalStateError, match="有效 JSON"):
+        ToolRegistry.load(path=path)
+    assert path.read_text(encoding="utf-8") == "{"

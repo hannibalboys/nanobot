@@ -11,6 +11,12 @@ from typing import Literal
 
 from nanobot_connector.config import ConnectorClientConfig, config_dir, config_path
 from nanobot_connector.credentials import SecretStore
+from nanobot_connector.persistence import (
+    LocalStateConflictError,
+    LocalStateError,
+    file_permission_issue,
+    write_json_atomic,
+)
 from nanobot_connector.tools import ToolDef, ToolRegistry
 
 ConflictPolicy = Literal["fail", "skip", "replace"]
@@ -40,7 +46,7 @@ def _template_path(name: str) -> Path:
     if not name or Path(name).name != name or name.endswith(".json"):
         raise ConnectorBootstrapError("工具档案名称无效")
     path = templates_dir() / f"{name}.json"
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         raise ConnectorBootstrapError(f"未找到工具档案：{name}")
     return path
 
@@ -77,7 +83,12 @@ def initialize_connector(*, home: Path | None = None) -> ConnectorClientConfig:
         cfg.save()
     tools_path = config_dir() / "tools.json"
     if not tools_path.exists():
-        ToolRegistry().save()
+        try:
+            ToolRegistry().save()
+        except LocalStateConflictError:
+            # A second local CLI/GUI instance won the creation race. Its atomic
+            # write is the desired safe empty state, so no user action is needed.
+            pass
     return cfg
 
 
@@ -101,7 +112,10 @@ def import_template(name: str, *, on_conflict: ConflictPolicy = "fail") -> list[
         registry.add(tool)
         imported.append(tool.name)
     if imported:
-        registry.save()
+        try:
+            registry.save()
+        except LocalStateConflictError as exc:
+            raise ConnectorBootstrapError(str(exc)) from exc
     return imported
 
 
@@ -113,10 +127,13 @@ def export_tool_template(name: str, output: Path) -> None:
     payload = tool.model_dump(by_alias=True)
     payload["env"] = {}
     target = output.expanduser().resolve()
+    if output.expanduser().is_symlink():
+        raise ConnectorBootstrapError("不能覆盖符号链接形式的工具档案")
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"tools": [payload]}, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, target)
+    try:
+        write_json_atomic(target, {"tools": [payload]}, mode=0o644)
+    except LocalStateError as exc:
+        raise ConnectorBootstrapError(str(exc)) from exc
 
 
 def doctor_connector(*, strict: bool = False) -> ConnectorDoctorResult:
@@ -144,9 +161,24 @@ def doctor_connector(*, strict: bool = False) -> ConnectorDoctorResult:
     if cfg.insecure:
         message = "当前连接器启用了 --insecure，生产环境不得使用"
         (errors if strict else warnings).append(message)
+    for state_file in (
+        config_path(),
+        config_dir() / "tools.json",
+        config_dir() / "mcp.json",
+        config_dir() / "secrets.index.json",
+    ):
+        if state_file.exists() and (permission_issue := file_permission_issue(state_file)):
+            message = f"{state_file.name}：{permission_issue}"
+            (errors if strict else warnings).append(message)
     if not SecretStore().secure_backend_available():
         message = "当前系统没有可用的操作系统凭据库，不能安全保存工具凭据"
         (errors if strict else warnings).append(message)
+    try:
+        credential_issues = SecretStore().integrity_issues()
+    except Exception as exc:  # noqa: BLE001 - doctor must remain actionable
+        credential_issues = [f"无法核验凭据索引一致性：{exc}"]
+    if credential_issues:
+        (errors if strict else warnings).extend(credential_issues)
     return ConnectorDoctorResult(
         ok=not errors,
         errors=errors,

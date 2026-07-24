@@ -44,6 +44,39 @@ def test_repair_to_new_server_requires_explicit_confirmation() -> None:
     assert cfg.device_token == "old"
 
 
+def test_invalid_pairing_port_is_a_user_facing_error() -> None:
+    cfg = ConnectorClientConfig()
+
+    with pytest.raises(PairingError, match="端口无效"):
+        pair_device(cfg, server="wss://example.test:not-a-port", code="ABCD")
+
+
+def test_repairing_same_server_retains_existing_certificate_pin() -> None:
+    pin = "ab" * 32
+    cfg = ConnectorClientConfig(server="wss://example.test", cert_fingerprint=pin)
+    payload = {"nodeId": "node", "token": "token"}
+
+    with patch("nanobot_connector.pairing._http_get_json", return_value=payload), patch.object(
+        ConnectorClientConfig, "save"
+    ):
+        pair_device(cfg, server="wss://example.test", code="ABCD")
+
+    assert cfg.cert_fingerprint == pin
+
+
+def test_initial_pair_saves_an_untracked_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NANOBOT_CONNECTOR_HOME", str(tmp_path / "home"))
+    cfg = ConnectorClientConfig()
+
+    with patch(
+        "nanobot_connector.pairing._http_get_json", return_value={"nodeId": "node", "token": "token"}
+    ):
+        pair_device(cfg, server="wss://example.test", code="ABCD")
+
+    assert cfg.node_id == "node"
+    assert ConnectorClientConfig.load().device_token == "token"
+
+
 def test_failed_repair_preserves_existing_identity() -> None:
     cfg = ConnectorClientConfig(server="wss://old.example", device_token="old", node_id="old-node")
 

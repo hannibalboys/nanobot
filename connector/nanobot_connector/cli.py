@@ -329,13 +329,13 @@ def secret_migrate_legacy(
     from nanobot_connector.credentials import CredentialStoreError, SecretStore
 
     try:
-        migrated = SecretStore().migrate_legacy(delete_after_success=delete_after_success)
+        result = SecretStore().migrate_legacy(delete_after_success=delete_after_success)
     except CredentialStoreError as exc:
         typer.secho(f"迁移失败：{exc}", fg=typer.colors.RED)
         raise typer.Exit(1) from exc
     typer.secho(
-        f"已迁移 {len(migrated)} 个凭据。"
-        + ("旧明文文件已删除。" if delete_after_success else "旧明文文件尚未删除，请确认后手动清理。"),
+        f"已迁移 {len(result.migrated_ids)} 个凭据。"
+        + ("旧明文文件已删除。" if result.legacy_deleted else "旧明文文件尚未删除，请确认后手动清理。"),
         fg=typer.colors.GREEN,
     )
 

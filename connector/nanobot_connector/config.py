@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from pydantic.alias_generators import to_camel
 
+from nanobot_connector.persistence import (
+    LocalStateConflictError,
+    file_fingerprint,
+    locked_file,
+    write_json_atomic,
+)
+
 CONNECTOR_CONFIG_VERSION = 1
+
+
+class ConnectorConfigConflictError(LocalStateConflictError):
+    """Raised when another local process changed connector config first."""
 
 
 def config_dir() -> Path:
@@ -48,34 +58,32 @@ class ConnectorClientConfig(BaseModel):
     desktop_enabled: bool = False
     desktop_max_fps: int = 2
     desktop_max_dimension: int = 1280
+    _snapshot: str | None = PrivateAttr(default=None)
+    _loaded_from_disk: bool = PrivateAttr(default=False)
 
     def save(self) -> None:
         path = config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self.model_dump(by_alias=True), handle, indent=2, ensure_ascii=False)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, path)
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+        with locked_file(path):
+            current = file_fingerprint(path)
+            if self._loaded_from_disk and current != self._snapshot:
+                raise ConnectorConfigConflictError(
+                    "连接器配置已被另一个本机进程修改；请重新加载后再提交修改"
+                )
+            write_json_atomic(path, self.model_dump(by_alias=True))
+            self._snapshot = file_fingerprint(path)
+            self._loaded_from_disk = True
 
     @classmethod
     def load(cls) -> "ConnectorClientConfig":
         try:
             data = json.loads(config_path().read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
-            return cls()
+        except FileNotFoundError:
+            config = cls()
+            config._snapshot = file_fingerprint(config_path())
+            config._loaded_from_disk = True
+            return config
+        except (OSError, ValueError) as exc:
+            raise ValueError("connector 配置文件不是有效 JSON") from exc
         if not isinstance(data, dict):
             raise ValueError("connector config root must be an object")
         version = data.get("configVersion", data.get("config_version", 0))
@@ -90,4 +98,7 @@ class ConnectorClientConfig(BaseModel):
             )
         data.pop("config_version", None)
         data["configVersion"] = CONNECTOR_CONFIG_VERSION
-        return cls.model_validate(data)
+        config = cls.model_validate(data)
+        config._snapshot = file_fingerprint(config_path())
+        config._loaded_from_disk = True
+        return config

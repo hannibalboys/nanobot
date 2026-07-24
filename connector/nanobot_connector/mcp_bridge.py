@@ -23,6 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from nanobot_connector.config import config_dir
+from nanobot_connector.persistence import (
+    LocalStateConflictError,
+    LocalStateError,
+    file_fingerprint,
+    locked_file,
+    write_json_atomic,
+)
 from nanobot_connector.tools import _NAME_RE, SecretStore
 
 McpApproval = Literal["auto", "webui", "local"]
@@ -71,6 +78,7 @@ class McpRegistry:
     def __init__(self, servers: list[McpServerDef] | None = None, *, path=None) -> None:
         self._path = path or (config_dir() / "mcp.json")
         self._servers: dict[str, McpServerDef] = {}
+        self._snapshot = file_fingerprint(self._path)
         for s in servers or []:
             self._servers[s.name] = s
 
@@ -81,24 +89,30 @@ class McpRegistry:
         reg = cls(path=path)
         try:
             data = json.loads(reg._path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             return reg
+        except (OSError, ValueError) as exc:
+            raise LocalStateError(f"MCP 注册表不是有效 JSON：{reg._path}") from exc
+        if not isinstance(data, dict):
+            raise LocalStateError(f"MCP 注册表根节点必须是对象：{reg._path}")
         for row in data.get("servers", []) if isinstance(data, dict) else []:
             try:
                 reg._servers[row["name"]] = McpServerDef.model_validate(row)
             except Exception:  # noqa: BLE001 - skip malformed, keep the rest
                 continue
+        reg._snapshot = file_fingerprint(reg._path)
         return reg
 
     def save(self) -> None:
-        import json
-        import os
-
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"servers": [s.model_dump(by_alias=True, exclude_defaults=True) for s in self._servers.values()]}
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
+        with locked_file(self._path):
+            current = file_fingerprint(self._path)
+            if current != self._snapshot:
+                raise LocalStateConflictError(
+                    "MCP 注册表已被其他连接器进程修改；请重新读取后再提交修改"
+                )
+            write_json_atomic(self._path, payload)
+            self._snapshot = file_fingerprint(self._path)
 
     def add(self, server: McpServerDef) -> None:
         self._servers[server.name] = server

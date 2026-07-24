@@ -129,13 +129,22 @@ def create_config_app() -> typer.Typer:
         output: str = typer.Option(..., "--output", "-o", help="输出的无密钥部署档案路径。"),
         config: str | None = typer.Option(None, "--config", "-c", help="源配置文件路径。"),
         dry_run: bool = typer.Option(False, "--dry-run", help="仅检查，不写入文件。"),
+        json_output: bool = typer.Option(False, "--json", help="输出机器可读 JSON。"),
     ) -> None:
         """从现有配置导出需人工审阅的无密钥部署档案。"""
         try:
             export_profile(_target_path(config), Path(output), dry_run=dry_run)
-            typer.secho("已导出无密钥部署档案，请在提交前人工审阅。", fg=typer.colors.GREEN)
+            _emit(
+                {
+                    "ok": True,
+                    "message": "已导出无密钥部署档案，请在提交前人工审阅。",
+                    "output": str(Path(output).expanduser().resolve()),
+                    "dryRun": dry_run,
+                },
+                as_json=json_output,
+            )
         except ConfigBootstrapError as exc:
-            typer.secho(f"错误：{exc}", fg=typer.colors.RED)
+            _emit({"ok": False, "errors": [str(exc)]}, as_json=json_output)
             raise typer.Exit(1) from exc
 
     return app

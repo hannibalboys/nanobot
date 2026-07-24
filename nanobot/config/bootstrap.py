@@ -19,8 +19,9 @@ from nanobot.config.loader import (
     _resolve_env_vars,
     _write_json_atomic,
     config_to_dict,
+    file_permission_issue,
     load_config,
-    save_config,
+    restrict_file_permissions,
 )
 from nanobot.config.schema import Config
 
@@ -35,6 +36,7 @@ _FORBIDDEN_TEMPLATE_KEYS = {
     "secrets",
 }
 _SENSITIVE_VALUE_KEYS = {"apikey", "token", "secret", "password", "privatekey"}
+_MACHINE_PATH_KEYS = {"workspace", "workdir", "cwd", "path", "root", "roots", "directory", "folder"}
 
 
 class ConfigBootstrapError(ValueError):
@@ -51,6 +53,17 @@ class CheckResult:
 
 def builtin_template_path() -> Path:
     return Path(__file__).with_name("templates") / "config.example.json"
+
+
+def _safe_path(path: Path, *, label: str) -> Path:
+    """Refuse links for configuration lifecycle writes and exports."""
+    expanded = path.expanduser()
+    try:
+        if expanded.is_symlink():
+            raise ConfigBootstrapError(f"{label}不能是符号链接：{expanded}")
+    except OSError as exc:
+        raise ConfigBootstrapError(f"无法检查{label}路径：{expanded}: {exc}") from exc
+    return expanded.resolve()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -112,15 +125,27 @@ def _backup(path: Path) -> Path | None:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.{stamp}.bak")
+    suffix = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.{stamp}.{suffix}.bak")
+        suffix += 1
     shutil.copy2(path, backup)
     try:
-        os.chmod(backup, 0o600)
+        restrict_file_permissions(backup)
+    except OSError as exc:
+        backup.unlink(missing_ok=True)
+        raise ConfigBootstrapError(f"无法限制配置备份权限：{exc}") from exc
+    try:
+        with backup.open("rb") as handle:
+            os.fsync(handle.fileno())
     except OSError:
+        # The backup is still useful on platforms that do not allow fsync for
+        # this file type; preserve the original copy rather than failing late.
         pass
     return backup
 
 
-def _merge_plugin_defaults(path: Path) -> None:
+def _merge_plugin_defaults(path: Path, *, lock_held: bool = False) -> None:
     """Add discovered channel defaults without importing channel runtimes."""
     from nanobot.channels.contracts import channel_default_config
     from nanobot.channels.registry import discover_plugins
@@ -129,22 +154,28 @@ def _merge_plugin_defaults(path: Path) -> None:
     plugins = discover_plugins()
     if not plugins:
         return
+    def merge_defaults() -> None:
+        data = _read_json(path)
+        channels = data.setdefault("channels", {})
+        if not isinstance(channels, dict):
+            raise ConfigBootstrapError("channels 必须是对象")
+        changed = False
+        for name, plugin in plugins.items():
+            defaults = channel_default_config(plugin)
+            existing = channels.get(name)
+            merged = defaults if existing is None else merge_missing_defaults(existing, defaults)
+            if merged != existing:
+                channels[name] = merged
+                changed = True
+        if changed:
+            _write_json_atomic(path, data)
+
+    if lock_held:
+        merge_defaults()
+        return
     try:
         with FileLock(str(path) + ".lock", timeout=10):
-            data = _read_json(path)
-            channels = data.setdefault("channels", {})
-            if not isinstance(channels, dict):
-                raise ConfigBootstrapError("channels 必须是对象")
-            changed = False
-            for name, plugin in plugins.items():
-                defaults = channel_default_config(plugin)
-                existing = channels.get(name)
-                merged = defaults if existing is None else merge_missing_defaults(existing, defaults)
-                if merged != existing:
-                    channels[name] = merged
-                    changed = True
-            if changed:
-                _write_json_atomic(path, data)
+            merge_defaults()
     except Timeout as exc:
         raise ConfigBootstrapError(f"等待插件配置写入锁超时：{path}") from exc
 
@@ -157,38 +188,64 @@ def initialize_config(
     dry_run: bool = False,
 ) -> tuple[Config, Path | None]:
     """Create a complete config from defaults and an optional safe template."""
-    path = path.expanduser().resolve()
-    if path.exists() and not force:
-        raise ConfigBootstrapError(f"配置已存在：{path}（如确需覆盖，请显式传入 --force）")
+    path = _safe_path(path, label="配置")
 
-    template = _read_json((template_path or builtin_template_path()).expanduser().resolve())
-    _validate_template(template)
+    builtin_template = _read_json(_safe_path(builtin_template_path(), label="内置配置模板"))
+    _validate_template(builtin_template)
+    template = builtin_template
+    if template_path is not None:
+        deployment_template = _read_json(_safe_path(template_path, label="部署档案"))
+        _validate_template(deployment_template)
+        template = _merge(template, deployment_template)
     defaults = config_to_dict(Config())
     merged = _merge(defaults, template)
     try:
         config = Config.model_validate(_migrate_config(merged))
     except ValueError as exc:
         raise ConfigBootstrapError(f"模板不符合配置 Schema: {exc}") from exc
-    backup = _backup(path) if path.exists() and not dry_run else None
-    if not dry_run:
-        save_config(config, path)
-        _merge_plugin_defaults(path)
+    if dry_run:
+        if path.exists() and not force:
+            raise ConfigBootstrapError(f"配置已存在：{path}（如确需覆盖，请显式传入 --force）")
+        return config, None
+    try:
+        with FileLock(str(path) + ".lock", timeout=10):
+            if path.exists() and not force:
+                raise ConfigBootstrapError(f"配置已存在：{path}（如确需覆盖，请显式传入 --force）")
+            backup = _backup(path) if path.exists() else None
+            _write_json_atomic(path, config_to_dict(config))
+            _merge_plugin_defaults(path, lock_held=True)
+    except Timeout as exc:
+        raise ConfigBootstrapError(f"等待配置写入锁超时：{path}") from exc
+    except OSError as exc:
+        raise ConfigBootstrapError(f"无法安全写入配置：{path}: {exc}") from exc
     return config, backup
 
 
 def refresh_config(path: Path, *, dry_run: bool = False) -> tuple[Config, Path | None]:
     """Migrate an existing config and serialize any newly-added defaults."""
-    path = path.expanduser().resolve()
-    if not path.exists():
-        raise ConfigBootstrapError(f"配置不存在：{path}")
+    path = _safe_path(path, label="配置")
+    if dry_run:
+        if not path.exists():
+            raise ConfigBootstrapError(f"配置不存在：{path}")
+        try:
+            return load_config(path), None
+        except ValueError as exc:
+            raise ConfigBootstrapError(str(exc)) from exc
     try:
-        config = load_config(path)
-    except ValueError as exc:
-        raise ConfigBootstrapError(str(exc)) from exc
-    backup = _backup(path) if not dry_run else None
-    if not dry_run:
-        save_config(config, path)
-        _merge_plugin_defaults(path)
+        with FileLock(str(path) + ".lock", timeout=10):
+            if not path.exists():
+                raise ConfigBootstrapError(f"配置不存在：{path}")
+            try:
+                config = load_config(path)
+            except ValueError as exc:
+                raise ConfigBootstrapError(str(exc)) from exc
+            backup = _backup(path)
+            _write_json_atomic(path, config_to_dict(config))
+            _merge_plugin_defaults(path, lock_held=True)
+    except Timeout as exc:
+        raise ConfigBootstrapError(f"等待配置写入锁超时：{path}") from exc
+    except OSError as exc:
+        raise ConfigBootstrapError(f"无法安全刷新配置：{path}: {exc}") from exc
     return config, backup
 
 
@@ -211,7 +268,7 @@ def _inline_secret_fields(data: dict[str, Any]) -> list[str]:
 
 def validate_config(path: Path, *, strict: bool = False) -> CheckResult:
     """Validate a config without writing it or displaying secret values."""
-    path = path.expanduser().resolve()
+    path = _safe_path(path, label="配置")
     errors: list[str] = []
     warnings: list[str] = []
     try:
@@ -255,13 +312,9 @@ def doctor_config(path: Path, *, strict: bool = False) -> CheckResult:
         return CheckResult(False, errors, warnings, details)
     if not os.access(path.parent, os.W_OK):
         errors.append(f"配置目录不可写：{path.parent}")
-    if os.name != "nt":
-        try:
-            if path.stat().st_mode & 0o077:
-                message = "配置文件权限过宽，建议仅允许当前用户读取"
-                (errors if strict else warnings).append(message)
-        except OSError as exc:
-            warnings.append(f"无法检查配置文件权限：{exc}")
+    permission_issue = file_permission_issue(path)
+    if permission_issue:
+        (errors if strict else warnings).append(permission_issue)
     try:
         config = load_config(path)
         workspace = config.workspace_path
@@ -284,7 +337,9 @@ def doctor_config(path: Path, *, strict: bool = False) -> CheckResult:
 
 def export_profile(source: Path, output: Path, *, dry_run: bool = False) -> None:
     """Export a reviewable deployment profile without inline secrets."""
-    config = load_config(source.expanduser().resolve())
+    source = _safe_path(source, label="源配置")
+    output = _safe_path(output, label="部署档案输出")
+    config = load_config(source)
     data = config_to_dict(config)
 
     def sanitize(value: Any, key: str = "") -> Any:
@@ -293,6 +348,12 @@ def export_profile(source: Path, output: Path, *, dry_run: bool = False) -> None
             return None
         if _is_sensitive_key(key) and isinstance(value, str) and value.strip():
             return ""
+        if isinstance(value, str) and normalized in _MACHINE_PATH_KEYS:
+            if value.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+                # The standard workspace remains portable because it resolves
+                # relative to the target user's home directory. Other absolute
+                # paths need a deliberate target-side decision and are removed.
+                return "~/.nanobot/workspace" if normalized == "workspace" else ""
         if isinstance(value, dict):
             result: dict[str, Any] = {}
             for child_key, child_value in value.items():
@@ -307,5 +368,9 @@ def export_profile(source: Path, output: Path, *, dry_run: bool = False) -> None
     sanitized = sanitize(data)
     if not isinstance(sanitized, dict):  # defensive, Config always serializes to a dict
         raise ConfigBootstrapError("无法导出部署档案")
+    sanitized["profileReviewRequired"] = True
     if not dry_run:
-        _write_json_atomic(output.expanduser().resolve(), sanitized)
+        try:
+            _write_json_atomic(output, sanitized)
+        except OSError as exc:
+            raise ConfigBootstrapError(f"无法安全导出部署档案：{output}: {exc}") from exc

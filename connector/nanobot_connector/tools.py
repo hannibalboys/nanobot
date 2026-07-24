@@ -15,7 +15,6 @@ env/secret vars — never any secret value.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +24,13 @@ from pydantic.alias_generators import to_camel
 
 from nanobot_connector.config import config_dir
 from nanobot_connector.credentials import CredentialStoreError, SecretStore
+from nanobot_connector.persistence import (
+    LocalStateConflictError,
+    LocalStateError,
+    file_fingerprint,
+    locked_file,
+    write_json_atomic,
+)
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
@@ -147,6 +153,7 @@ class ToolRegistry:
         self._path = path or (config_dir() / "tools.json")
         self._secrets = secrets or SecretStore()
         self._tools: dict[str, ToolDef] = {}
+        self._snapshot = file_fingerprint(self._path)
         for t in tools or []:
             self._tools[t.name] = t
 
@@ -157,22 +164,31 @@ class ToolRegistry:
         reg = cls(path=path, secrets=secrets)
         try:
             data = json.loads(reg._path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             return reg
+        except (OSError, ValueError) as exc:
+            raise LocalStateError(f"工具注册表不是有效 JSON：{reg._path}") from exc
+        if not isinstance(data, dict):
+            raise LocalStateError(f"工具注册表根节点必须是对象：{reg._path}")
         for row in data.get("tools", []) if isinstance(data, dict) else []:
             try:
                 tool = ToolDef.model_validate(row)
             except Exception:  # noqa: BLE001 - skip malformed entries, keep the rest
                 continue
             reg._tools[tool.name] = tool
+        reg._snapshot = file_fingerprint(reg._path)
         return reg
 
     def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"tools": [t.model_dump(by_alias=True, exclude_defaults=True) for t in self._tools.values()]}
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
+        with locked_file(self._path):
+            current = file_fingerprint(self._path)
+            if current != self._snapshot:
+                raise LocalStateConflictError(
+                    "工具注册表已被其他连接器进程修改；请重新读取后再提交修改"
+                )
+            write_json_atomic(self._path, payload)
+            self._snapshot = file_fingerprint(self._path)
 
     # -- registry ops -------------------------------------------------------
 

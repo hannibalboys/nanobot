@@ -24,7 +24,7 @@
 nanobot config export-profile --output .\deployment\profiles\production.json
 ```
 
-导出结果会移除已知敏感字段；仍须人工审阅后才可提交。特别检查工作区、端口、渠道开关、
+导出结果会写入 `profileReviewRequired: true`，移除已知敏感字段与机器专属绝对路径；仍须人工审阅后才可提交。特别检查工作区、端口、渠道开关、
 模型选择和 `connector` 的高风险开关。生产档案应默认保持：
 
 ```json

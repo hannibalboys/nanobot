@@ -8,6 +8,7 @@ import contextlib
 import pytest
 
 from nanobot_connector.mcp_bridge import McpBridge, McpRegistry, McpServerDef
+from nanobot_connector.persistence import LocalStateConflictError, LocalStateError
 
 
 @pytest.fixture(autouse=True)
@@ -204,6 +205,29 @@ def test_registry_roundtrip_and_malformed_skip(tmp_path):
 
     reloaded = McpRegistry.load(path=path)
     assert [s.name for s in reloaded.list()] == ["fs"]
+
+
+def test_registry_save_rejects_stale_snapshot(tmp_path):
+    path = tmp_path / "mcp.json"
+    first = McpRegistry.load(path=path)
+    second = McpRegistry.load(path=path)
+
+    first.add(McpServerDef(name="one", command="one"))
+    first.save()
+    second.add(McpServerDef(name="two", command="two"))
+
+    with pytest.raises(LocalStateConflictError, match="其他连接器进程"):
+        second.save()
+    assert [server.name for server in McpRegistry.load(path=path).list()] == ["one"]
+
+
+def test_malformed_registry_document_is_rejected_without_overwrite(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(LocalStateError, match="有效 JSON"):
+        McpRegistry.load(path=path)
+    assert path.read_text(encoding="utf-8") == "{"
 
 
 async def test_bridge_request_after_stop_fails_fast():

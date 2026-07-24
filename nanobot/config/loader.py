@@ -20,6 +20,75 @@ _current_config_path: Path | None = None
 _schema_refs_ready = False
 
 
+def restrict_file_permissions(path: Path) -> None:
+    """Limit a declaration or backup file to its owner on supported platforms."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Windows chmod only controls a read-only attribute; its DACL is set below.
+        pass
+    if os.name != "nt":
+        return
+    try:
+        import ntsecuritycon
+        import win32api
+        import win32security
+
+        user_sid = win32security.LookupAccountName(None, win32api.GetUserName())[0]
+        system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
+        admins_sid = win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid, None)
+        dacl = win32security.ACL()
+        user_access = ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, user_access, user_sid)
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, system_sid)
+        dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, admins_sid)
+        security_info = (
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+        )
+        win32security.SetNamedSecurityInfo(
+            str(path), win32security.SE_FILE_OBJECT, security_info, None, None, dacl, None
+        )
+    except Exception as exc:  # noqa: BLE001 - Windows security APIs expose several error types
+        raise OSError(f"无法设置仅当前用户可访问的 Windows DACL：{exc}") from exc
+
+
+def file_permission_issue(path: Path) -> str | None:
+    """Return a safe diagnostic when a config file is readable/writable too broadly."""
+    try:
+        if os.name != "nt":
+            return "配置文件权限过宽，建议仅允许当前用户读取" if path.stat().st_mode & 0o077 else None
+        import ntsecuritycon
+        import win32api
+        import win32security
+
+        user_sid = win32security.LookupAccountName(None, win32api.GetUserName())[0]
+        system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
+        admins_sid = win32security.CreateWellKnownSid(win32security.WinBuiltinAdministratorsSid, None)
+        trusted_sids = {str(user_sid), str(system_sid), str(admins_sid)}
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+        )
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        if dacl is None:
+            return "Windows DACL 缺失，无法保护配置文件"
+        write_mask = (
+            ntsecuritycon.FILE_GENERIC_WRITE
+            | ntsecuritycon.FILE_WRITE_DATA
+            | ntsecuritycon.FILE_APPEND_DATA
+            | ntsecuritycon.WRITE_DAC
+            | ntsecuritycon.DELETE
+        )
+        for index in range(dacl.GetAceCount()):
+            ace = dacl.GetAce(index)
+            if ace[0][0] == win32security.ACCESS_ALLOWED_ACE_TYPE and ace[1] & write_mask:
+                if str(ace[2]) not in trusted_sids:
+                    return "Windows DACL 向非受信主体授予了配置写权限"
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not expose ACL internals
+        return f"无法验证 Windows DACL：{exc}"
+    return None
+
+
 def set_config_path(path: Path) -> None:
     """Set the current config path (used to derive data directory)."""
     global _current_config_path
@@ -113,11 +182,8 @@ def _write_json_atomic(path: Path, data: Any) -> None:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
+        restrict_file_permissions(tmp_path)
         os.replace(tmp_path, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
         if os.name != "nt":
             try:
                 directory_fd = os.open(path.parent, os.O_RDONLY)
