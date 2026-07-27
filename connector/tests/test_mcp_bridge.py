@@ -7,7 +7,7 @@ import contextlib
 
 import pytest
 
-from nanobot_connector.mcp_bridge import McpBridge, McpRegistry, McpServerDef
+from nanobot_connector.mcp_bridge import McpBridge, McpRegistry, McpServerDef, probe_mcp_server
 from nanobot_connector.persistence import LocalStateConflictError, LocalStateError
 
 
@@ -160,6 +160,39 @@ async def test_bridge_enabled_tools_filter():
     await bridge.stop()
 
 
+async def test_disabled_server_is_not_started_and_reports_stopped():
+    sdef = McpServerDef(name="s", command="x", enabled=False)
+
+    @contextlib.asynccontextmanager
+    async def should_not_connect(_sdef, _env):
+        pytest.fail("a stopped MCP server must not be connected")
+        yield  # pragma: no cover - satisfies the async-context-manager protocol
+
+    bridge = McpBridge(McpRegistry([sdef]), session_factory=should_not_connect)
+    await bridge.start()
+    health = bridge.server_health()
+    assert health == [{
+        "server": "s", "healthy": False, "toolCount": 0,
+        "error": None, "state": "stopped",
+    }]
+    assert bridge.list_tools() == []
+    await bridge.stop()
+
+
+async def test_probe_server_returns_visible_tools_without_running_bridge():
+    session = FakeSession([FakeTool("search", "find files"), FakeTool("admin")])
+    result = await probe_mcp_server(
+        McpServerDef(name="fs", command="x", enabled_tools=["search"]),
+        session_factory=_factory(session),
+    )
+    assert result["healthy"] is True
+    assert result["toolCount"] == 1
+    assert result["tools"] == [{
+        "server": "fs", "name": "search", "description": "find files",
+        "inputSchema": {}, "approval": "local",
+    }]
+
+
 async def test_bridge_unavailable_server_call_raises():
     session = FakeSession([FakeTool("x")])
     bridge = McpBridge(
@@ -205,6 +238,15 @@ def test_registry_roundtrip_and_malformed_skip(tmp_path):
 
     reloaded = McpRegistry.load(path=path)
     assert [s.name for s in reloaded.list()] == ["fs"]
+
+
+def test_registry_preserves_stopped_server_state(tmp_path):
+    path = tmp_path / "mcp.json"
+    reg = McpRegistry([McpServerDef(name="fs", command="x", enabled=False)], path=path)
+    reg.save()
+    reloaded = McpRegistry.load(path=path)
+    assert reloaded.get("fs") is not None
+    assert reloaded.get("fs").enabled is False
 
 
 def test_registry_save_rejects_stale_snapshot(tmp_path):

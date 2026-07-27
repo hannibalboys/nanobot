@@ -13,6 +13,7 @@ from the 授权窗口 tab takes effect immediately.
 from __future__ import annotations
 
 import asyncio
+import queue
 import re
 import threading
 import time
@@ -34,7 +35,7 @@ from nanobot_connector.files import is_filesystem_root
 from nanobot_connector.logbuf import clear as clear_log
 from nanobot_connector.logbuf import log_event
 from nanobot_connector.logbuf import snapshot as log_snapshot
-from nanobot_connector.mcp_bridge import McpRegistry, McpServerDef
+from nanobot_connector.mcp_bridge import McpRegistry, McpServerDef, probe_mcp_server
 from nanobot_connector.pairing import (
     PairingError,
     normalize_pairing_code,
@@ -91,7 +92,11 @@ class ConnectorGui:
         self._client_thread: threading.Thread | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
         self._client_task: asyncio.Task | None = None
+        self._client = None
         self._running = False
+        self._mcp_servers: dict[str, McpServerDef] = {}
+        self._mcp_probe_status: dict[str, str] = {}
+        self._ui_callbacks: queue.SimpleQueue = queue.SimpleQueue()
 
         root.title("nanobot 连接器")
         root.geometry("640x520")
@@ -498,21 +503,35 @@ class ConnectorGui:
 
         ttk.Label(
             tab,
-            text="桥接本机正在运行的 MCP server，让 Agent 经本机调用它们的工具。",
+            text=(
+                "桥接本机 MCP server，让 Agent 经本机调用它们的工具。右键服务可查看"
+                "工具详情、测试连通性、启动或停止。"
+            ),
             wraplength=560,
         ).pack(anchor=tk.W, pady=(0, 8))
 
-        columns = ("name", "transport", "target", "approval")
+        columns = ("name", "transport", "target", "approval", "state")
         self.mcp_tree = ttk.Treeview(tab, columns=columns, show="headings", height=8)
         self.mcp_tree.heading("name", text="名称")
         self.mcp_tree.heading("transport", text="方式")
         self.mcp_tree.heading("target", text="命令 / 地址")
         self.mcp_tree.heading("approval", text="审批方式")
-        self.mcp_tree.column("name", width=120)
-        self.mcp_tree.column("transport", width=110, anchor=tk.CENTER)
-        self.mcp_tree.column("target", width=230)
-        self.mcp_tree.column("approval", width=80, anchor=tk.CENTER)
+        self.mcp_tree.heading("state", text="状态")
+        self.mcp_tree.column("name", width=100)
+        self.mcp_tree.column("transport", width=80, anchor=tk.CENTER)
+        self.mcp_tree.column("target", width=180)
+        self.mcp_tree.column("approval", width=70, anchor=tk.CENTER)
+        self.mcp_tree.column("state", width=145)
         self.mcp_tree.pack(fill=tk.BOTH, expand=True)
+        self.mcp_tree.bind("<Button-3>", self._show_mcp_context_menu)
+        self.mcp_tree.bind("<Double-1>", lambda _event: self._show_mcp_details())
+
+        self.mcp_menu = tk.Menu(self.mcp_tree, tearoff=False)
+        self.mcp_menu.add_command(label="详情（查看工具）", command=self._show_mcp_details)
+        self.mcp_menu.add_command(label="测试连通性", command=self._test_mcp)
+        self.mcp_menu.add_separator()
+        self.mcp_menu.add_command(label="启动服务", command=lambda: self._set_mcp_enabled(True))
+        self.mcp_menu.add_command(label="停止服务", command=lambda: self._set_mcp_enabled(False))
 
         btn_row = ttk.Frame(tab)
         btn_row.pack(fill=tk.X, pady=(10, 0))
@@ -523,17 +542,167 @@ class ConnectorGui:
         ttk.Button(btn_row, text="删除选中", command=self._remove_mcp).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        ttk.Button(btn_row, text="刷新状态", command=self._refresh_mcp).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
         self._refresh_mcp()
 
     def _refresh_mcp(self) -> None:
         self.mcp_tree.delete(*self.mcp_tree.get_children())
-        for server in McpRegistry.load().list():
+        self._mcp_servers = {server.name: server for server in McpRegistry.load().list()}
+        for server in self._mcp_servers.values():
             self.mcp_tree.insert(
                 "",
                 tk.END,
                 values=(server.name, server.transport(), server.command or server.url,
-                        server.approval),
+                        server.approval, self._mcp_state_text(server)),
             )
+
+    def _refresh_mcp_status(self) -> None:
+        """Refresh only the live state column without clearing user selection."""
+        for item in self.mcp_tree.get_children():
+            values = list(self.mcp_tree.item(item, "values"))
+            if not values:
+                continue
+            server = self._mcp_servers.get(str(values[0]))
+            if server is None:
+                continue
+            values[4] = self._mcp_state_text(server)
+            self.mcp_tree.item(item, values=values)
+
+    def _mcp_state_text(self, server: McpServerDef) -> str:
+        probe = self._mcp_probe_status.get(server.name, "")
+        if not server.enabled:
+            return f"已停止（{probe}）" if probe.startswith("测试通过") else "已停止"
+        if probe == "测试中…":
+            return probe
+
+        if not self._running:
+            return probe or "等待连接器启动"
+        bridge = getattr(self._client, "mcp_bridge", None)
+        if bridge is None:
+            return "未加载"
+        try:
+            health = {row["server"]: row for row in bridge.server_health()}.get(server.name)
+        except Exception:  # noqa: BLE001 - UI must remain usable during client shutdown
+            health = None
+        if health is None:
+            return probe or "正在加载"
+        if health.get("healthy"):
+            return f"已连接（{health.get('toolCount', 0)} 工具）"
+        if health.get("error"):
+            return f"连接失败：{str(health['error'])[:36]}"
+        return probe or "正在连接…"
+
+    def _selected_mcp(self) -> McpServerDef | None:
+        selection = self.mcp_tree.selection()
+        if not selection:
+            messagebox.showinfo("未选择 MCP 服务", "请先选择一个 MCP 服务。", parent=self.root)
+            return None
+        values = self.mcp_tree.item(selection[0], "values")
+        return self._mcp_servers.get(str(values[0])) if values else None
+
+    def _show_mcp_context_menu(self, event) -> None:
+        item = self.mcp_tree.identify_row(event.y)
+        if not item:
+            return
+        self.mcp_tree.selection_set(item)
+        self.mcp_tree.focus(item)
+        try:
+            self.mcp_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.mcp_menu.grab_release()
+
+    def _show_mcp_details(self) -> None:
+        server = self._selected_mcp()
+        if server is not None:
+            self._probe_mcp(server, show_details=True)
+
+    def _test_mcp(self) -> None:
+        server = self._selected_mcp()
+        if server is not None:
+            self._probe_mcp(server, show_details=False)
+
+    def _probe_mcp(self, server: McpServerDef, *, show_details: bool) -> None:
+        """Run MCP initialize + tools/list off the Tk event loop."""
+        self._mcp_probe_status[server.name] = "测试中…"
+        self._refresh_mcp_status()
+
+        def _run_probe() -> None:
+            try:
+                result = asyncio.run(probe_mcp_server(server))
+            except Exception as exc:  # noqa: BLE001 - show the local connection failure
+                error = str(exc)
+                self._ui_callbacks.put(
+                    lambda: self._finish_mcp_probe(server, None, error, show_details)
+                )
+                return
+            self._ui_callbacks.put(
+                lambda: self._finish_mcp_probe(server, result, None, show_details)
+            )
+
+        threading.Thread(
+            target=_run_probe, name=f"mcp-probe-{server.name}", daemon=True
+        ).start()
+
+    def _finish_mcp_probe(
+        self,
+        server: McpServerDef,
+        result: dict | None,
+        error: str | None,
+        show_details: bool,
+    ) -> None:
+        if error is not None:
+            self._mcp_probe_status[server.name] = f"测试失败：{error[:36]}"
+            self._refresh_mcp_status()
+            messagebox.showerror(
+                "MCP 服务不可用",
+                f"「{server.name}」无法完成初始化或读取工具列表：\n{error}",
+                parent=self.root,
+            )
+            return
+
+        assert result is not None
+        count = int(result.get("toolCount", 0))
+        self._mcp_probe_status[server.name] = f"测试通过（{count} 工具）"
+        self._refresh_mcp_status()
+        if show_details:
+            _McpDetailsDialog(self.root, server, result)
+        else:
+            messagebox.showinfo(
+                "MCP 服务可用",
+                f"「{server.name}」连接和初始化成功，发现 {count} 个可用工具。",
+                parent=self.root,
+            )
+
+    def _set_mcp_enabled(self, enabled: bool) -> None:
+        server = self._selected_mcp()
+        if server is None:
+            return
+        if server.enabled == enabled:
+            messagebox.showinfo(
+                "无需更改",
+                f"「{server.name}」当前已经{'启动' if enabled else '停止'}。",
+                parent=self.root,
+            )
+            return
+        try:
+            registry = McpRegistry.load()
+            current = registry.get(server.name)
+            if current is None:
+                raise ValueError("该 MCP 服务已不存在，请刷新列表。")
+            registry.add(current.model_copy(update={"enabled": enabled}))
+            registry.save()
+        except Exception as exc:  # noqa: BLE001 - preserve the current daemon on failed save
+            messagebox.showerror("更新失败", str(exc), parent=self.root)
+            return
+
+        self._mcp_probe_status.pop(server.name, None)
+        self._refresh_mcp()
+        self._apply_and_reconnect()
+        action = "启动" if enabled else "停止"
+        extra = "连接器正在连接该服务。" if enabled and self._running else ""
+        messagebox.showinfo("MCP 服务已更新", f"「{server.name}」已{action}。{extra}", parent=self.root)
 
     def _add_mcp(self) -> None:
         dialog = _McpDialog(self.root)
@@ -767,6 +936,7 @@ class ConnectorGui:
             return
         self.cfg = ConnectorClientConfig.load()
         client = build_daemon_client(self.cfg)
+        self._client = client
         log_event("正在启动连接器…")
 
         def _run() -> None:
@@ -784,6 +954,7 @@ class ConnectorGui:
             finally:
                 loop.close()
                 self._running = False
+                self._client = None
                 self._client_loop = None
                 self._client_task = None
 
@@ -800,6 +971,7 @@ class ConnectorGui:
         if self._client_thread and self._client_thread.is_alive():
             self._client_thread.join(timeout=5)
         self._client_thread = None
+        self._client = None
         self._running = False
         log_event("已断开连接。")
 
@@ -821,13 +993,27 @@ class ConnectorGui:
 
     def _tick(self) -> None:
         """Per-second UI refresh (arm countdowns + log tail + connection badge)."""
+        self._run_ui_callbacks()
         self._refresh_arm()
         self._refresh_log_view()
+        self._refresh_mcp_status()
         if self._running:
             self.conn_state_var.set("● 已连接")
         else:
             self.conn_state_var.set("○ 未连接")
         self.root.after(1000, self._tick)
+
+    def _run_ui_callbacks(self) -> None:
+        """Run callbacks queued by worker threads on Tk's owning thread."""
+        while True:
+            try:
+                callback = self._ui_callbacks.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001 - keep the GUI usable after one failed callback
+                log_event(f"界面后台任务处理失败：{exc}", "error")
 
     def _on_close(self) -> None:
         self._stop_client()
@@ -1116,6 +1302,50 @@ class _McpDialog(_Dialog):
             messagebox.showerror("无效的服务", str(exc), parent=self.top)
             return
         self.close()
+
+
+class _McpDetailsDialog(_Dialog):
+    """Read-only details for a server definition and its live tool discovery."""
+
+    def __init__(self, parent: tk.Tk, server: McpServerDef, probe: dict) -> None:
+        import json
+
+        super().__init__(parent, f"MCP 服务详情：{server.name}")
+        self.top.resizable(True, True)
+        self.top.minsize(580, 360)
+
+        target = " ".join([server.command, *server.args]).strip() if server.command else server.url
+        enabled_tools = "全部" if "*" in server.enabled_tools else "、".join(server.enabled_tools)
+        lines = [
+            f"名称：{server.name}",
+            f"连接方式：{server.transport()}",
+            f"命令 / 地址：{target}",
+            f"审批方式：{server.approval}",
+            f"服务状态：{'已启用' if server.enabled else '已停止'}（本次连接测试成功）",
+            f"允许桥接：{enabled_tools or '无'}",
+            "",
+            f"发现 {probe.get('toolCount', 0)} 个可用工具：",
+        ]
+        for tool in probe.get("tools", []):
+            name = str(tool.get("name") or "(未命名工具)")
+            description = str(tool.get("description") or "（没有描述）")
+            lines.extend([f"\n• {name}", f"  {description}"])
+            schema = tool.get("inputSchema")
+            if schema:
+                lines.append("  参数：" + json.dumps(schema, ensure_ascii=False, indent=2))
+
+        text_frame = ttk.Frame(self.body)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        text = tk.Text(text_frame, wrap=tk.WORD, height=18, font=("Consolas", 9))
+        scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text.yview)
+        text.config(yscrollcommand=scroll.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.insert("1.0", "\n".join(lines))
+        text.config(state=tk.DISABLED)
+
+        ttk.Button(self.body, text="关闭", command=self.close).pack(anchor=tk.E, pady=(12, 0))
+        self.wait(parent)
 
 
 def run_gui() -> None:

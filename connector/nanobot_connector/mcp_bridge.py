@@ -54,6 +54,7 @@ class McpServerDef(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     approval: McpApproval = "local"  # safe default
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
+    enabled: bool = True  # stopped servers stay registered but are not connected
 
     @field_validator("name")
     @classmethod
@@ -123,6 +124,20 @@ class McpRegistry:
     def list(self) -> list[McpServerDef]:
         return list(self._servers.values())
 
+    def get(self, name: str) -> McpServerDef | None:
+        """Return one locally registered MCP server, if present."""
+        return self._servers.get(name)
+
+
+def _resolve_server_env(sdef: McpServerDef, secrets: SecretStore) -> dict[str, str]:
+    """Build one server's process environment without exposing secret values."""
+    env = dict(sdef.env)
+    for var, secret_id in sdef.secrets.items():
+        value = secrets.get(secret_id)
+        if value is not None:
+            env[var] = value
+    return env
+
 
 # --- MCP session abstraction (injectable for tests) ----------------------
 
@@ -169,6 +184,38 @@ def _tool_public(tool: Any, *, server: str, approval: str) -> dict[str, Any]:
         "description": getattr(tool, "description", "") or "",
         "inputSchema": getattr(tool, "inputSchema", None) or {},
         "approval": approval,
+    }
+
+
+async def probe_mcp_server(
+    sdef: McpServerDef,
+    *,
+    secrets: SecretStore | None = None,
+    session_factory: SessionFactory | None = None,
+) -> dict[str, Any]:
+    """Connect briefly to one MCP server and return its visible tools.
+
+    This is intentionally independent of the long-lived bridge, so the GUI can
+    test a newly added or currently stopped definition without interrupting the
+    connector's active MCP sessions.  For stdio definitions the child exists
+    only for the duration of this probe and is closed before this coroutine
+    returns.
+    """
+    store = secrets or SecretStore()
+    factory = session_factory or _default_session_factory
+    env = _resolve_server_env(sdef, store)
+    async with factory(sdef, env) as session:
+        await session.initialize()
+        listed = await session.list_tools()
+    tools = [
+        _tool_public(tool, server=sdef.name, approval=sdef.approval)
+        for tool in _selected_tools(listed, sdef)
+    ]
+    return {
+        "server": sdef.name,
+        "healthy": True,
+        "toolCount": len(tools),
+        "tools": tools,
     }
 
 
@@ -309,15 +356,12 @@ class McpBridge:
         self._on_local_approval = on_local_approval
 
     def _resolve_env(self, sdef: McpServerDef) -> dict[str, str]:
-        env = dict(sdef.env)
-        for var, secret_id in sdef.secrets.items():
-            value = self._secrets.get(secret_id)
-            if value is not None:
-                env[var] = value
-        return env
+        return _resolve_server_env(sdef, self._secrets)
 
     async def start(self) -> None:
         for sdef in self._registry.list():
+            if not sdef.enabled:
+                continue
             conn = _ServerConn(sdef, self._resolve_env(sdef), self._factory)
             self._conns[sdef.name] = conn
             conn.start()
@@ -348,10 +392,26 @@ class McpBridge:
         return out
 
     def server_health(self) -> list[dict[str, Any]]:
-        return [
-            {"server": name, "healthy": conn.healthy, "toolCount": len(conn.tools), "error": conn.error}
-            for name, conn in self._conns.items()
-        ]
+        health: list[dict[str, Any]] = []
+        for sdef in self._registry.list():
+            conn = self._conns.get(sdef.name)
+            if not sdef.enabled:
+                health.append({
+                    "server": sdef.name, "healthy": False, "toolCount": 0,
+                    "error": None, "state": "stopped",
+                })
+            elif conn is None:
+                health.append({
+                    "server": sdef.name, "healthy": False, "toolCount": 0,
+                    "error": "not started", "state": "starting",
+                })
+            else:
+                health.append({
+                    "server": sdef.name, "healthy": conn.healthy,
+                    "toolCount": len(conn.tools), "error": conn.error,
+                    "state": "connected" if conn.healthy else "error" if conn.error else "starting",
+                })
+        return health
 
     def approval_for(self, server: str) -> str:
         """The approval policy of a bridged server (default 'local' if unknown)."""
