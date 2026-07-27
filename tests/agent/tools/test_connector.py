@@ -468,9 +468,11 @@ async def test_desktop_session_returns_first_frame(tmp_path):
     mgr = FakeDesktopManager()
     tool = _desktop_tool(ConnectorDesktopSessionTool, mgr, tmp_path)
     out = await tool.execute(node_id="dev-1", goal="open app")
-    payload = json.loads(out)
-    assert payload["sessionId"] == "sess-1"
-    assert payload["image"] == "aW1n"
+    assert isinstance(out, list)
+    assert out[0]["type"] == "image_url"
+    assert out[0]["image_url"]["url"] == "data:image/png;base64,aW1n"
+    assert "session_id: sess-1" in out[1]["text"]
+    assert "aW1n" not in out[1]["text"]
     assert mgr.calls[0][:3] == ("start", "dev-1", "open app")
 
 
@@ -478,8 +480,11 @@ async def test_desktop_act_returns_next_frame(tmp_path):
     mgr = FakeDesktopManager()
     tool = _desktop_tool(ConnectorDesktopActTool, mgr, tmp_path)
     out = await tool.execute(session_id="sess-1", action={"type": "click", "x": 1, "y": 2})
-    payload = json.loads(out)
-    assert payload["width"] == 800
+    assert isinstance(out, list)
+    assert out[0]["type"] == "image_url"
+    assert out[0]["image_url"]["url"] == "data:image/png;base64,aW1n"
+    assert "session_id: sess-1" in out[1]["text"]
+    assert "800x600" in out[1]["text"]
     assert mgr.calls[0] == ("act", "sess-1", {"type": "click", "x": 1, "y": 2})
 
 

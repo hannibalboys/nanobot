@@ -699,6 +699,53 @@ class _ConnectorDesktopTool(_ConnectorTool):
             "Desktop control is not available on this server (connector.allowDesktopControl is off)."
         )
 
+    @staticmethod
+    def _frame_content(
+        result: dict[str, Any], *, session_id: str, status: str
+    ) -> list[dict[str, Any]] | ToolResult:
+        """Return a desktop frame as model-native multimodal tool content.
+
+        Screenshots must remain an ``image_url`` block.  Serializing the base64
+        string inside JSON makes it inert text, so a vision-capable model cannot
+        inspect the desktop it is meant to control.
+        """
+        image = result.get("image")
+        if not isinstance(image, str) or not image:
+            return ToolResult.error(
+                "The connector returned an empty desktop screenshot. Stop and end the "
+                f"desktop session with connector_desktop_end(session_id={session_id!r})."
+            )
+
+        image_format = str(result.get("format") or "png").lower()
+        mime = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+        }.get(image_format)
+        if mime is None:
+            return ToolResult.error(
+                f"The connector returned an unsupported desktop image format: {image_format}."
+            )
+
+        width = result.get("width", 0)
+        height = result.get("height", 0)
+        return [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{image}"},
+                "_meta": {"source": "connector_desktop", "session_id": session_id},
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"{status} session_id: {session_id}; "
+                    f"screenshot: {width}x{height} ({image_format}). "
+                    "Inspect the attached screenshot before choosing the next action."
+                ),
+            },
+        ]
+
 
 @tool_parameters({
     "type": "object",
@@ -714,8 +761,9 @@ class ConnectorDesktopSessionTool(_ConnectorDesktopTool):
     description = (
         "Start a controlled desktop-control session on a paired device to operate "
         "GUI apps. Requires the device owner to approve on their machine. Returns a "
-        "session_id and the first screenshot; then use connector_desktop_act to click/"
-        "type based on the screenshot, and connector_desktop_end when done."
+        "session_id plus the first screenshot as a native image result (requires a "
+        "vision-capable model); then use connector_desktop_act to click/type based on "
+        "the screenshot, and connector_desktop_end when done."
     )
 
     async def execute(self, node_id: str, goal: str, **kwargs: Any) -> Any:
@@ -727,7 +775,10 @@ class ConnectorDesktopSessionTool(_ConnectorDesktopTool):
             )
         except ConnectorError as exc:
             return self._map_error(exc)
-        return json.dumps(result, ensure_ascii=False)
+        session_id = result.get("sessionId") if isinstance(result, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            return ToolResult.error("The connector returned a desktop session without a session_id.")
+        return self._frame_content(result, session_id=session_id, status="Desktop session started.")
 
 
 @tool_parameters({
@@ -747,8 +798,9 @@ class ConnectorDesktopActTool(_ConnectorDesktopTool):
     name = "connector_desktop_act"
     description = (
         "Perform one mouse/keyboard action in an active desktop session and return "
-        "the next screenshot. Sensitive actions (pay/confirm/delete/password) require "
-        "the device owner to confirm before they run."
+        "the next screenshot as a native image result (requires a vision-capable model). "
+        "Sensitive actions (pay/confirm/delete/password) require the device owner to "
+        "confirm before they run."
     )
 
     async def execute(self, session_id: str, action: dict[str, Any], **kwargs: Any) -> Any:
@@ -758,7 +810,9 @@ class ConnectorDesktopActTool(_ConnectorDesktopTool):
             result = await self._manager.act(session_id, action or {}, operator_id=self._operator_id())
         except ConnectorError as exc:
             return self._map_error(exc)
-        return json.dumps(result, ensure_ascii=False)
+        if not isinstance(result, dict):
+            return ToolResult.error("The connector returned an invalid desktop screenshot result.")
+        return self._frame_content(result, session_id=session_id, status="Desktop action completed.")
 
 
 @tool_parameters({

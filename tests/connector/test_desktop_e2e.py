@@ -7,7 +7,7 @@ confirm → take over over HTTP → audit written; frames not persisted by defau
 from __future__ import annotations
 
 import asyncio
-import json
+import re
 
 from nanobot.agent.tools.connector import (
     ConnectorDesktopActTool,
@@ -47,19 +47,28 @@ def _tools(gw, tmp_path):
     return session_tool, act_tool
 
 
+def _session_id_from_frame(content):
+    assert isinstance(content, list)
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"] == "data:image/png;base64,aW1n"
+    text = next(block["text"] for block in content if block.get("type") == "text")
+    match = re.search(r"session_id: ([^;]+)", text)
+    assert match is not None
+    return match.group(1)
+
+
 async def test_e2e_desktop_session_and_act(tmp_path):
     gw = _gateway(tmp_path, allow_desktop_control=True)
     node_id, sconn, serve_task, ctask, connector = await _online(gw)
     session_tool, act_tool = _tools(gw, tmp_path)
 
     # agent opens a session (device consents) → gets first screenshot
-    started = json.loads(await session_tool.execute(node_id=node_id, goal="open the app"))
-    sid = started["sessionId"]
-    assert started["image"] == "aW1n" and started["width"] == 800
+    started = await session_tool.execute(node_id=node_id, goal="open the app")
+    sid = _session_id_from_frame(started)
 
     # agent acts on the screenshot
-    out = json.loads(await act_tool.execute(session_id=sid, action={"type": "click", "x": 10, "y": 20}))
-    assert out["image"] == "aW1n"
+    out = await act_tool.execute(session_id=sid, action={"type": "click", "x": 10, "y": 20})
+    assert _session_id_from_frame(out) == sid
     assert connector.injected == [{"type": "click", "x": 10, "y": 20}]
 
     # session visible over the management route; owner takes over
@@ -96,8 +105,8 @@ async def test_e2e_sensitive_action_confirm_loop(tmp_path):
     gw = _gateway(tmp_path, allow_desktop_control=True)
     node_id, sconn, serve_task, ctask, connector = await _online(gw)
     session_tool, act_tool = _tools(gw, tmp_path)
-    started = json.loads(await session_tool.execute(node_id=node_id, goal="pay"))
-    sid = started["sessionId"]
+    started = await session_tool.execute(node_id=node_id, goal="pay")
+    sid = _session_id_from_frame(started)
 
     async def approve_soon():
         for _ in range(200):
@@ -108,11 +117,11 @@ async def test_e2e_sensitive_action_confirm_loop(tmp_path):
             await asyncio.sleep(0.02)
 
     tk = asyncio.create_task(approve_soon())
-    out = json.loads(await act_tool.execute(
+    out = await act_tool.execute(
         session_id=sid, action={"type": "click", "label": "Confirm payment", "x": 5, "y": 5}
-    ))
+    )
     await tk
-    assert out["image"] == "aW1n"  # injected after confirmation
+    assert _session_id_from_frame(out) == sid  # injected after confirmation
     assert connector.injected  # the sensitive click did run
 
     await sconn.close()
