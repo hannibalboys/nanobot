@@ -4,7 +4,7 @@ Use this page after `nanobot agent -m "Hello!"` works locally. Deployment keeps 
 
 ## Before You Deploy
 
-Check these once before Docker, systemd, or LaunchAgent:
+Check these once before Render, Docker, systemd, or LaunchAgent:
 
 | Check | Why it matters |
 |---|---|
@@ -22,10 +22,22 @@ Restart the deployed process after editing `config.json`. Long-running processes
 
 | Runtime | Use it for | State location | Useful first command |
 |---|---|---|---|
+| Render | One-click hosted gateway and WebUI | Persistent disk at `/home/nanobot/.nanobot` | [Deploy to Render](#render) |
 | Docker Compose | Repeatable container runs on Linux servers or workstations | Bind-mount `~/.nanobot` to `/home/nanobot/.nanobot` | `docker compose run --rm nanobot-cli agent -m "Hello!"` |
 | Docker CLI | Manual container testing or small one-off hosts | Bind-mount `~/.nanobot` to `/home/nanobot/.nanobot` | `docker run -v ~/.nanobot:/home/nanobot/.nanobot --rm nanobot status` |
 | systemd user service | Linux user-level gateway that restarts automatically | Host user's `~/.nanobot` unless you pass explicit paths | `systemctl --user status nanobot-gateway` |
 | macOS LaunchAgent | macOS gateway that starts after login | Host user's `~/.nanobot` unless the plist passes explicit paths | `launchctl list | grep ai.nanobot.gateway` |
+
+## Render
+
+Run nanobot online without managing a server. The blueprint deploys the gateway and bundled WebUI together, with a persistent disk so sessions, memory, and chat history survive restarts.
+
+> [!IMPORTANT]
+> This setup requires a paid Render service because persistent disks are not available on the free tier. During setup, provide `ANTHROPIC_API_KEY` and set `NANOBOT_WEB_TOKEN` to a strong private password (for example, generate one with `openssl rand -hex 32`).
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/HKUDS/nanobot)
+
+[Review the deployment blueprint](../render.yaml)
 
 ## Docker
 
@@ -62,6 +74,22 @@ Restart the deployed process after editing `config.json`. Long-running processes
 
 ### Docker Compose
 
+The default image preinstalls WhatsApp dependencies. To bake other enabled
+channels into an image (recommended for deployments without PyPI access), pass
+a comma-separated `NANOBOT_CHANNELS` build argument:
+
+```bash
+NANOBOT_CHANNELS=telegram,slack docker compose build
+```
+
+The image keeps nanobot in a virtual environment owned by its built-in non-root
+runtime user (UID 1000). If an enabled channel was not preinstalled, gateway
+startup can therefore install its manifest-declared dependencies. Rebuilding
+with `NANOBOT_CHANNELS` keeps that installation reproducible instead of relying
+on the container's writable layer. If you override the container with a
+different `--user`, bake every enabled channel into the image because that UID
+is not guaranteed write access to the virtual environment.
+
 ```bash
 docker compose run --rm nanobot-cli onboard   # first-time setup
 vim ~/.nanobot/config.json                     # add API keys
@@ -93,6 +121,12 @@ bwrap sandbox is enabled.
 ```bash
 # Build the image
 docker build -t nanobot .
+
+# Or preinstall a regular Python extra such as Bedrock support
+docker build --build-arg NANOBOT_EXTRAS=bedrock -t nanobot .
+
+# Or preinstall dependencies for a specific set of channels
+docker build --build-arg NANOBOT_CHANNELS=telegram,slack -t nanobot .
 
 # Initialize config (first time only)
 docker run -v ~/.nanobot:/home/nanobot/.nanobot --rm nanobot onboard

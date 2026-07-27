@@ -480,7 +480,7 @@ describe("webui i18n", () => {
     const chat = resources["pt-BR"].common.chat;
 
     expect(sidebar.settings).toBe("Configurações");
-    expect(chat.newChat).toBe("Nova conversa");
+    expect(chat.newChat).toBe("Novo tópico");
     expect(settings.nav.browser).toBe("Web");
     expect(settings.sections.webSearch).toBe("Busca na web");
     expect(settings.byok.tabs.webSearch).toBe("Busca na web");

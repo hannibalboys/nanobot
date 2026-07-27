@@ -269,8 +269,11 @@ def test_channels_config_has_no_per_channel_fields():
     cfg = ChannelsConfig()
     assert not hasattr(cfg, "telegram")
     assert cfg.send_progress is True
-    assert cfg.send_tool_hints is False
+    assert cfg.send_tool_hints is True
     assert cfg.extract_document_text is True
+
+    opted_out = ChannelsConfig.model_validate({"sendToolHints": False})
+    assert opted_out.send_tool_hints is False
 
 
 def test_channels_config_extract_document_text_accepts_camel_alias():
@@ -1499,6 +1502,63 @@ def test_plugins_enable_skips_install_when_extra_is_present(monkeypatch, tmp_pat
     assert not config_path.exists()
 
 
+def test_repository_dependency_installer_selects_all_channel_manifests(monkeypatch):
+    from scripts import install_channel_dependencies as dependencies
+
+    plugins = {
+        "second": ChannelPlugin(
+            name="second",
+            display_name="Second",
+            runtime="missing.second.runtime:SecondChannel",
+            dependencies=("second-sdk>=2",),
+        ),
+        "first": ChannelPlugin(
+            name="first",
+            display_name="First",
+            runtime="missing.first.runtime:FirstChannel",
+            dependencies=("first-sdk>=1",),
+        ),
+    }
+    prepared: list[tuple[set[str], dict[str, ChannelPlugin]]] = []
+    monkeypatch.setattr(dependencies, "discover_plugins", lambda: plugins)
+    monkeypatch.setattr(
+        dependencies,
+        "ensure_enabled_channel_dependencies",
+        lambda names, discovered: prepared.append((names, discovered)) or {},
+    )
+
+    assert dependencies.main(["--all-channels"]) == 0
+    assert prepared == [(set(plugins), plugins)]
+
+
+def test_repository_dependency_installer_rejects_unknown_channel(monkeypatch, capsys):
+    from scripts import install_channel_dependencies as dependencies
+
+    monkeypatch.setattr(dependencies, "discover_plugins", lambda: {})
+
+    assert dependencies.main(["missing"]) == 2
+    assert "Unknown channels: missing" in capsys.readouterr().err
+
+
+def test_repository_dependency_installer_propagates_install_failure(monkeypatch, capsys):
+    from scripts import install_channel_dependencies as dependencies
+
+    plugin = ChannelPlugin(
+        name="demo",
+        display_name="Demo",
+        runtime="missing.demo.runtime:DemoChannel",
+    )
+    monkeypatch.setattr(dependencies, "discover_plugins", lambda: {"demo": plugin})
+    monkeypatch.setattr(
+        dependencies,
+        "ensure_enabled_channel_dependencies",
+        lambda _names, _plugins: {"demo": "dependency install failed"},
+    )
+
+    assert dependencies.main(["demo"]) == 1
+    assert "demo: dependency install failed" in capsys.readouterr().err
+
+
 def test_plugins_disable_channel_writes_config(monkeypatch, tmp_path):
     from typer.testing import CliRunner
 
@@ -2451,6 +2511,36 @@ def test_optional_dependency_groups_falls_back_to_package_metadata(monkeypatch):
     )
 
 
+def test_load_pyproject_propagates_malformed_toml(tmp_path):
+    from nanobot import optional_features
+
+    path = tmp_path / "pyproject.toml"
+    path.write_text("[project\nname = 'nanobot'", encoding="utf-8")
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        optional_features.load_pyproject(path)
+
+
+def test_optional_dependency_metadata_propagates_malformed_requirement(monkeypatch):
+    from packaging.requirements import InvalidRequirement
+
+    from nanobot import optional_features
+
+    class _Metadata:
+        def get_all(self, key: str):
+            assert key == "Provides-Extra"
+            return ["bedrock"]
+
+    monkeypatch.setattr("importlib.metadata.metadata", lambda _name: _Metadata())
+    monkeypatch.setattr(
+        "importlib.metadata.requires",
+        lambda _name: ["not a valid requirement ???"],
+    )
+
+    with pytest.raises(InvalidRequirement):
+        optional_features.optional_dependency_groups_from_metadata()
+
+
 def test_install_args_for_extra_resolves_metadata_markers_for_current_platform():
     from nanobot import optional_features
 
@@ -2728,7 +2818,7 @@ async def test_send_with_retry_no_retry_when_max_is_zero():
 @pytest.mark.asyncio
 async def test_send_with_retry_calls_send_delta():
     """_send_with_retry should call send_delta for stream delta events."""
-    calls: list[tuple[str, str, str | None, bool, bool]] = []
+    calls: list[tuple[str, str, str | None, bool, bool, bool]] = []
 
     class _StreamingChannel(BaseChannel):
         name = "streaming"
@@ -2752,8 +2842,9 @@ async def test_send_with_retry_calls_send_delta():
             stream_id: str | None = None,
             stream_end: bool = False,
             resuming: bool = False,
+            merge_next: bool = False,
         ) -> None:
-            calls.append((chat_id, delta, stream_id, stream_end, resuming))
+            calls.append((chat_id, delta, stream_id, stream_end, resuming, merge_next))
 
     fake_config = SimpleNamespace(
         channels=ChannelsConfig(send_max_retries=3),
@@ -2775,13 +2866,18 @@ async def test_send_with_retry_calls_send_delta():
     end = outbound_message_for_event(
         channel="streaming",
         chat_id="123",
-        event=StreamEndEvent(content="", stream_id="s1", resuming=True),
+        event=StreamEndEvent(
+            content="",
+            stream_id="s1",
+            resuming=True,
+            merge_next=True,
+        ),
     )
     await mgr._send_with_retry(mgr.channels["streaming"], end)
 
     assert calls == [
-        ("123", "test delta", "s1", False, False),
-        ("123", "", "s1", True, True),
+        ("123", "test delta", "s1", False, False, False),
+        ("123", "", "s1", True, True, True),
     ]
 
 

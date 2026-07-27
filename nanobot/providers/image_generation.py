@@ -33,6 +33,23 @@ _AIHUBMIX_ASPECT_RATIO_SIZES = {
 }
 _GEMINI_DEFAULT_TIMEOUT_S = 120.0
 _GEMINI_IMAGEN_ASPECT_RATIOS = {"1:1", "9:16", "16:9", "3:4", "4:3"}
+# Aspect ratios documented for every Gemini image model using generateContent.
+_GEMINI_FLASH_COMMON_ASPECT_RATIOS = {
+    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+}
+# Gemini 3.1 Flash and Flash Lite additionally accept extreme aspect ratios.
+_GEMINI_31_FLASH_ASPECT_RATIOS = {
+    *_GEMINI_FLASH_COMMON_ASPECT_RATIOS,
+    "1:4",
+    "4:1",
+    "1:8",
+    "8:1",
+}
+# Gemini 3 Pro image models accept these sizes. Gemini 3.1 Flash adds 512,
+# while Gemini 3.1 Flash Lite supports only 1K.
+_GEMINI_3_IMAGE_SIZES = {"1K", "2K", "4K"}
+_GEMINI_31_FLASH_IMAGE_SIZES = {"512", *_GEMINI_3_IMAGE_SIZES}
+_GEMINI_31_FLASH_LITE_IMAGE_SIZES = {"1K"}
 _OLLAMA_DEFAULT_SIDE = 1024
 _OLLAMA_SIZE_PRESETS = {
     "1K": 1024,
@@ -177,6 +194,7 @@ class ImageGenerationProvider(ABC):
     """Base class for image generation provider clients."""
 
     provider_name: str = ""
+    model_options: tuple[str, ...] = ()
     missing_key_message: str = ""
     default_timeout: float = _DEFAULT_TIMEOUT_S
 
@@ -254,6 +272,7 @@ class OpenRouterImageGenerationClient(ImageGenerationProvider):
     """Small async client for OpenRouter Chat Completions image generation."""
 
     provider_name = "openrouter"
+    model_options = ("openai/gpt-5.4-image-2",)
     missing_key_message = (
         "OpenRouter API key is not configured. Set providers.openrouter.apiKey."
     )
@@ -345,6 +364,7 @@ class AIHubMixImageGenerationClient(ImageGenerationProvider):
     """Small async client for AIHubMix unified image generation."""
 
     provider_name = "aihubmix"
+    model_options = ("gpt-image-2-free",)
     missing_key_message = (
         "AIHubMix API key is not configured. Set providers.aihubmix.apiKey."
     )
@@ -515,6 +535,7 @@ class OllamaImageGenerationClient(ImageGenerationProvider):
     """Async client for Ollama native image generation models."""
 
     provider_name = "ollama"
+    model_options = ("x/z-image-turbo",)
     default_timeout = 300.0
 
     def _default_base_url(self) -> str:
@@ -591,6 +612,7 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
     """Async client for Gemini/Imagen image generation via the Generative Language API."""
 
     provider_name = "gemini"
+    model_options = ("gemini-2.5-flash-image", "imagen-4.0-generate-001")
     missing_key_message = (
         "Gemini API key is not configured. Set providers.gemini.apiKey."
     )
@@ -630,7 +652,11 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
                 prompt=prompt, model=model, aspect_ratio=aspect_ratio
             )
         return await self._generate_gemini_flash(
-            prompt=prompt, model=model, reference_images=reference_images or []
+            prompt=prompt,
+            model=model,
+            reference_images=reference_images or [],
+            aspect_ratio=aspect_ratio,
+            image_size=image_size,
         )
 
     async def _generate_imagen(
@@ -686,15 +712,22 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
         prompt: str,
         model: str,
         reference_images: list[str],
+        aspect_ratio: str | None = None,
+        image_size: str | None = None,
     ) -> GeneratedImageResponse:
         parts: list[dict[str, Any]] = [
             {"inlineData": image_path_to_inline_data(path)} for path in reference_images
         ]
         parts.append({"text": prompt})
 
+        generation_config: dict[str, Any] = {"responseModalities": ["TEXT", "IMAGE"]}
+        image_config = _gemini_flash_image_config(model, aspect_ratio, image_size)
+        if image_config:
+            generation_config["responseFormat"] = {"image": image_config}
+
         body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+            "generationConfig": generation_config,
         }
         body.update(self.extra_body)
 
@@ -741,6 +774,56 @@ class GeminiImageGenerationClient(ImageGenerationProvider):
             content="\n".join(t for t in text_parts if t).strip(),
             raw=data,
         )
+
+
+def _gemini_flash_image_config(
+    model: str,
+    aspect_ratio: str | None,
+    image_size: str | None,
+) -> dict[str, str]:
+    """Build the ``responseFormat.image`` config for Gemini Flash image models.
+
+    Capabilities are model-specific: Gemini 3.1 Flash variants support four
+    additional extreme ratios, while configurable image sizes are limited to
+    the documented Gemini 3 image model families.
+    """
+    config: dict[str, str] = {}
+    if aspect_ratio and aspect_ratio in _gemini_flash_supported_aspect_ratios(model):
+        config["aspectRatio"] = aspect_ratio
+    if image_size:
+        normalized = image_size.strip().upper()
+        if normalized in _gemini_flash_supported_image_sizes(model):
+            config["imageSize"] = normalized
+    return config
+
+
+def _gemini_flash_supported_aspect_ratios(model: str) -> set[str]:
+    """Return the documented aspect ratios for a generateContent image model."""
+    normalized = model.lower()
+    if (
+        "gemini-3.1-flash-lite-image" in normalized
+        or "gemini-3.1-flash-image" in normalized
+    ):
+        return _GEMINI_31_FLASH_ASPECT_RATIOS
+    if "gemini-" in normalized and "image" in normalized:
+        return _GEMINI_FLASH_COMMON_ASPECT_RATIOS
+    return set()
+
+
+def _gemini_flash_supported_image_sizes(model: str) -> set[str]:
+    """Return the ``imageSize`` values documented for a Flash-path model.
+
+    Earlier Flash image models (2.0, 2.5) expose no configurable size. Gemini
+    3.1 Flash Lite is intentionally checked before the broader Flash match.
+    """
+    normalized = model.lower()
+    if "gemini-3.1-flash-lite-image" in normalized:
+        return _GEMINI_31_FLASH_LITE_IMAGE_SIZES
+    if "gemini-3.1-flash-image" in normalized:
+        return _GEMINI_31_FLASH_IMAGE_SIZES
+    if "gemini-3-pro-image" in normalized:
+        return _GEMINI_3_IMAGE_SIZES
+    return set()
 
 
 async def _aihubmix_images_from_payload(
@@ -815,6 +898,7 @@ class MiniMaxImageGenerationClient(ImageGenerationProvider):
     """Async client for MiniMax image generation API."""
 
     provider_name = "minimax"
+    model_options = ("image-01",)
     missing_key_message = (
         "MiniMax API key is not configured. Set providers.minimax.apiKey."
     )
@@ -947,6 +1031,7 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
     """OpenAI Images API using an API key (``providers.openai.apiKey``)."""
 
     provider_name = "openai"
+    model_options = ("gpt-image-2", "gpt-image-1", "dall-e-3", "dall-e-2")
     missing_key_message = (
         "OpenAI API key is not configured. Set providers.openai.apiKey."
     )
@@ -1210,6 +1295,7 @@ class CodexImageGenerationClient(ImageGenerationProvider):
     """
 
     provider_name = "openai_codex"
+    model_options = ("gpt-5.4",)
     missing_key_message = (
         "Codex OAuth token is unavailable. "
         "Log in with Codex subscription first."
@@ -1508,6 +1594,7 @@ class StepFunImageGenerationClient(ImageGenerationProvider):
     """
 
     provider_name = "stepfun"
+    model_options = ("step-image-edit-2", "step-1x-medium")
     missing_key_message = (
         "StepFun API key is not configured. Set providers.stepfun.apiKey."
     )
@@ -1634,6 +1721,7 @@ class ZhipuImageGenerationClient(ImageGenerationProvider):
     """
 
     provider_name = "zhipu"
+    model_options = ("glm-image", "cogview-4", "cogview-4-250304", "cogview-3-flash")
     missing_key_message = "Zhipu API key is not configured. Set providers.zhipu.apiKey."
     default_timeout = _ZHIPU_TIMEOUT_S
 
@@ -1753,6 +1841,193 @@ async def _zhipu_images_from_payload(
 
 
 # ---------------------------------------------------------------------------
+# ModelScope (魔搭) image generation
+# ---------------------------------------------------------------------------
+
+_MODELSCOPE_TIMEOUT_S = 300.0
+_MODELSCOPE_POLL_INTERVAL_S = 5.0
+_MODELSCOPE_POLL_MAX_ATTEMPTS = 60  # 5 min at 5s intervals
+_MODELSCOPE_ASPECT_RATIOS = {
+    "1:1": "1328x1328",
+    "16:9": "1664x928",
+    "9:16": "928x1664",
+    "3:4": "1140x1472",
+    "4:3": "1472x1140",
+}
+
+
+def _modelscope_size(
+    aspect_ratio: str | None,
+    image_size: str | None,
+) -> str:
+    """Resolve aspect ratio / image_size to a ModelScope size string."""
+    if image_size and "x" in image_size.lower():
+        return image_size
+    if aspect_ratio and aspect_ratio in _MODELSCOPE_ASPECT_RATIOS:
+        return _MODELSCOPE_ASPECT_RATIOS[aspect_ratio]
+    return "1024x1024"
+
+
+class ModelScopeImageGenerationClient(ImageGenerationProvider):
+    """Async client for ModelScope (魔搭) AIGC image generation.
+
+    ModelScope uses an async task pattern: POST submits the job and returns
+    a task_id, then the client polls GET /tasks/{task_id} until
+    task_status is SUCCEED or FAILED.
+    """
+
+    provider_name = "modelscope"
+    model_options = ("Qwen/Qwen-Image-2512",)
+    missing_key_message = (
+        "ModelScope API key is not configured. Set providers.modelscope.apiKey."
+    )
+    default_timeout = _MODELSCOPE_TIMEOUT_S
+
+    def _default_base_url(self) -> str:
+        return "https://api-inference.modelscope.cn/v1"
+
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        reference_images: list[str] | None = None,
+        aspect_ratio: str | None = None,
+        image_size: str | None = None,
+    ) -> GeneratedImageResponse:
+        if not self.api_key:
+            raise ImageGenerationError(self.missing_key_message)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "X-ModelScope-Async-Mode": "true",
+            **self.extra_headers,
+        }
+
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+        }
+
+        size = _modelscope_size(aspect_ratio, image_size)
+        if size:
+            body["size"] = size
+
+        refs = list(reference_images or [])
+        if refs:
+            image_refs = [image_path_to_data_url(path) for path in refs]
+            body["image_url"] = image_refs[0] if len(image_refs) == 1 else image_refs
+
+        body.update(self.extra_body)
+
+        url = f"{self.api_base}/images/generations"
+        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        try:
+            return await self._generate_with_client(
+                client,
+                url=url,
+                headers=headers,
+                body=body,
+            )
+        finally:
+            if self._client is None:
+                await client.aclose()
+
+    async def _generate_with_client(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        url: str,
+        headers: dict[str, str],
+        body: dict[str, Any],
+    ) -> GeneratedImageResponse:
+        try:
+            response = await client.post(url, headers=headers, json=body)
+        except httpx.TimeoutException as exc:
+            raise ImageGenerationError("ModelScope image generation request timed out") from exc
+        except httpx.RequestError as exc:
+            raise ImageGenerationError(f"ModelScope image generation request failed: {exc}") from exc
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _http_error_detail(response)
+            raise ImageGenerationError(f"ModelScope image generation failed: {detail}") from exc
+
+        task_data = response.json()
+        task_id = task_data.get("task_id")
+        if not task_id:
+            raise ImageGenerationError(
+                f"ModelScope did not return a task_id: {response.text[:500]}"
+            )
+
+        images = await self._poll_task(client, task_id, headers)
+
+        self._require_images(images, task_data)
+        return GeneratedImageResponse(images=images, content="", raw=task_data)
+
+    async def _poll_task(
+        self,
+        client: httpx.AsyncClient,
+        task_id: str,
+        submit_headers: dict[str, str],
+    ) -> list[str]:
+        poll_headers = {
+            "Authorization": submit_headers["Authorization"],
+            "X-ModelScope-Task-Type": "image_generation",
+            **self.extra_headers,
+        }
+        poll_url = f"{self.api_base}/tasks/{task_id}"
+
+        for _ in range(_MODELSCOPE_POLL_MAX_ATTEMPTS):
+            try:
+                response = await client.get(poll_url, headers=poll_headers)
+            except httpx.RequestError:
+                await asyncio.sleep(_MODELSCOPE_POLL_INTERVAL_S)
+                continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = _http_error_detail(response)
+                raise ImageGenerationError(
+                    f"ModelScope task polling failed: {detail}"
+                ) from exc
+
+            data = response.json()
+            status = data.get("task_status")
+
+            if status == "SUCCEED":
+                return await self._collect_images(client, data)
+            if status == "FAILED":
+                raise ImageGenerationError(
+                    f"ModelScope image generation task failed: {data}"
+                )
+
+            await asyncio.sleep(_MODELSCOPE_POLL_INTERVAL_S)
+
+        raise ImageGenerationError(
+            f"ModelScope image generation timed out after "
+            f"{_MODELSCOPE_POLL_MAX_ATTEMPTS} polls"
+        )
+
+    @staticmethod
+    async def _collect_images(
+        client: httpx.AsyncClient,
+        data: dict[str, Any],
+    ) -> list[str]:
+        images: list[str] = []
+        for url in data.get("output_images") or []:
+            if isinstance(url, str) and url:
+                if url.startswith("data:image/"):
+                    images.append(url)
+                else:
+                    images.append(await _download_image_data_url(client, url))
+        return images
+
+
+# ---------------------------------------------------------------------------
 # Provider registration
 # ---------------------------------------------------------------------------
 
@@ -1766,3 +2041,4 @@ register_image_gen_provider(OpenAIImageGenerationClient)
 register_image_gen_provider(OpenRouterImageGenerationClient)
 register_image_gen_provider(StepFunImageGenerationClient)
 register_image_gen_provider(ZhipuImageGenerationClient)
+register_image_gen_provider(ModelScopeImageGenerationClient)
