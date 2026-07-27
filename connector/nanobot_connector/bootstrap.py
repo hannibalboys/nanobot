@@ -11,6 +11,7 @@ from typing import Literal
 
 from nanobot_connector.config import ConnectorClientConfig, config_dir, config_path
 from nanobot_connector.credentials import SecretStore
+from nanobot_connector.desktop import desktop_runtime_issues
 from nanobot_connector.persistence import (
     LocalStateConflictError,
     LocalStateError,
@@ -188,6 +189,12 @@ def doctor_connector(*, strict: bool = False) -> ConnectorDoctorResult:
     if cfg.insecure:
         message = "当前连接器启用了 --insecure，生产环境不得使用"
         (errors if strict else warnings).append(message)
+    desktop_issues: list[str] = []
+    if cfg.desktop_enabled:
+        desktop_issues = desktop_runtime_issues()
+        for issue in desktop_issues:
+            message = f"桌面控制：{issue}"
+            (errors if strict else warnings).append(message)
     for state_file in (
         config_path(),
         config_dir() / "tools.json",
@@ -215,5 +222,6 @@ def doctor_connector(*, strict: bool = False) -> ConnectorDoctorResult:
             "paired": bool(cfg.server and cfg.device_token),
             "tools": [tool.name for tool in tools],
             "desktopEnabled": cfg.desktop_enabled,
+            "desktopIssues": desktop_issues,
         },
     )

@@ -54,6 +54,19 @@ class InputBackend(Protocol):
     def inject(self, action: dict) -> None: ...  # pragma: no cover
 
 
+def _unavailable_reason(backend: object, fallback: str) -> str:
+    """Return a backend's safe diagnostic without requiring test fakes to implement it."""
+    getter = getattr(backend, "unavailable_reason", None)
+    if callable(getter):
+        try:
+            reason = getter()
+        except Exception:  # noqa: BLE001 - diagnostics must not mask the refusal
+            reason = None
+        if isinstance(reason, str) and reason.strip():
+            return reason
+    return fallback
+
+
 # on_indicator(active) -> None : toggle the on-device "capturing" indicator.
 IndicatorHook = Callable[[bool], None]
 # on_local_authorize(operator, goal) -> awaitable[bool]
@@ -106,7 +119,20 @@ class DesktopController:
         if not self.capture_backend.available():
             raise DesktopError(
                 proto.ERROR_NO_PERMISSION,
-                "screen recording / accessibility permission is not granted on this device",
+                _unavailable_reason(
+                    self.capture_backend,
+                    "屏幕捕获不可用。Windows 请确认连接器运行在当前已登录用户的桌面会话中；"
+                    "macOS 请授予屏幕录制权限。",
+                ),
+            )
+        if not self.input_backend.available():
+            raise DesktopError(
+                proto.ERROR_NO_PERMISSION,
+                _unavailable_reason(
+                    self.input_backend,
+                    "键鼠控制不可用。Windows 请确认连接器运行在当前已登录用户的桌面会话中；"
+                    "macOS 请授予辅助功能权限。",
+                ),
             )
         if self.on_local_authorize is None:
             raise DesktopError(proto.ERROR_DESKTOP_UNSUPPORTED, "no local authorization handler")
@@ -146,7 +172,14 @@ class DesktopController:
         if atype not in proto.DESKTOP_ACTIONS:
             raise DesktopError(proto.ERROR_OUT_OF_BOUNDS, f"unknown action type: {atype}")
         if not self.input_backend.available():
-            raise DesktopError(proto.ERROR_NO_PERMISSION, "input injection permission not granted")
+            raise DesktopError(
+                proto.ERROR_NO_PERMISSION,
+                _unavailable_reason(
+                    self.input_backend,
+                    "键鼠控制不可用。Windows 请确认连接器运行在当前已登录用户的桌面会话中；"
+                    "macOS 请授予辅助功能权限。",
+                ),
+            )
         width, height = self._last_size
         if width and height:
             _clamp_bounds(action, width, height)
@@ -172,13 +205,39 @@ class DesktopController:
 class _MssCapture:
     """Real screen capture via ``mss`` + ``Pillow`` (lazy-imported)."""
 
+    def __init__(self) -> None:
+        self._reason: str | None = None
+
     def available(self) -> bool:
         try:
-            import mss  # noqa: F401
+            import mss
             import PIL  # noqa: F401
-        except Exception:  # noqa: BLE001
+        except ImportError:
+            self._reason = (
+                "缺少桌面截屏依赖 mss 或 Pillow。请升级连接器；使用 Python 安装时执行："
+                "python -m pip install mss Pillow pynput"
+            )
             return False
+        try:
+            with mss.mss() as sct:
+                if len(sct.monitors) <= 1:
+                    self._reason = (
+                        "未检测到可捕获的交互式桌面。Windows 请在当前已登录用户会话中运行连接器，"
+                        "不要作为系统服务运行。"
+                    )
+                    return False
+        except Exception as exc:  # noqa: BLE001 - backend failures become a safe diagnostic
+            self._reason = (
+                "无法访问交互式桌面"
+                f"（{type(exc).__name__}）。Windows 请确认连接器运行在当前已登录用户会话中；"
+                "macOS 请授予屏幕录制权限。"
+            )
+            return False
+        self._reason = None
         return True
+
+    def unavailable_reason(self) -> str | None:
+        return self._reason
 
     def capture(self, *, max_dimension: int) -> ScreenFrame:  # pragma: no cover - needs a display
         import base64
@@ -187,9 +246,21 @@ class _MssCapture:
         import mss
         from PIL import Image
 
-        with mss.mss() as sct:
-            shot = sct.grab(sct.monitors[0])
-            img = Image.frombytes("RGB", shot.size, shot.rgb)
+        try:
+            with mss.mss() as sct:
+                if len(sct.monitors) <= 1:
+                    self._reason = "未检测到可捕获的交互式桌面。"
+                    raise DesktopError(proto.ERROR_NO_PERMISSION, self._reason)
+                shot = sct.grab(sct.monitors[0])
+        except DesktopError:
+            raise
+        except Exception as exc:
+            self._reason = (
+                "屏幕捕获失败"
+                f"（{type(exc).__name__}）。请确认连接器运行在当前已登录用户的桌面会话中。"
+            )
+            raise DesktopError(proto.ERROR_NO_PERMISSION, self._reason) from exc
+        img = Image.frombytes("RGB", shot.size, shot.rgb)
         w, h = img.size
         scale = min(1.0, max_dimension / max(w, h))
         if scale < 1.0:
@@ -205,35 +276,65 @@ class _MssCapture:
 class _PynputInput:
     """Real input injection via ``pynput`` (lazy-imported)."""
 
+    def __init__(self) -> None:
+        self._reason: str | None = None
+
     def available(self) -> bool:
         try:
             import pynput  # noqa: F401
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - unsupported desktop backends must fail closed
+            self._reason = (
+                "无法加载键鼠控制模块 pynput。请升级连接器；使用 Python 安装时执行："
+                "python -m pip install mss Pillow pynput。"
+            )
             return False
+        self._reason = None
         return True
 
-    def inject(self, action: dict) -> None:  # pragma: no cover - needs a desktop
-        from pynput import keyboard
-        from pynput import mouse as mouse_mod
+    def unavailable_reason(self) -> str | None:
+        return self._reason
 
-        atype = action.get("type")
-        if atype in ("click", "double_click", "right_click", "move", "drag"):
-            mouse = mouse_mod.Controller()
-            if "x" in action and "y" in action:
-                mouse.position = (int(action["x"]), int(action["y"]))
-            if atype == "move":
-                return
-            button = mouse_mod.Button.right if atype == "right_click" else mouse_mod.Button.left
-            if atype == "drag" and "to_x" in action:
-                mouse.press(button)
-                mouse.position = (int(action["to_x"]), int(action["to_y"]))
-                mouse.release(button)
-            else:
-                mouse.click(button, 2 if atype == "double_click" else 1)
-        elif atype in ("type", "key"):
-            keyboard.Controller().type(str(action.get("text", "")))
-        elif atype == "scroll":
-            mouse_mod.Controller().scroll(int(action.get("dx", 0)), int(action.get("dy", 0)))
+    def inject(self, action: dict) -> None:  # pragma: no cover - needs a desktop
+        try:
+            from pynput import keyboard
+            from pynput import mouse as mouse_mod
+
+            atype = action.get("type")
+            if atype in ("click", "double_click", "right_click", "move", "drag"):
+                mouse = mouse_mod.Controller()
+                if "x" in action and "y" in action:
+                    mouse.position = (int(action["x"]), int(action["y"]))
+                if atype == "move":
+                    return
+                button = mouse_mod.Button.right if atype == "right_click" else mouse_mod.Button.left
+                if atype == "drag" and "to_x" in action:
+                    mouse.press(button)
+                    mouse.position = (int(action["to_x"]), int(action["to_y"]))
+                    mouse.release(button)
+                else:
+                    mouse.click(button, 2 if atype == "double_click" else 1)
+            elif atype in ("type", "key"):
+                keyboard.Controller().type(str(action.get("text", "")))
+            elif atype == "scroll":
+                mouse_mod.Controller().scroll(int(action.get("dx", 0)), int(action.get("dy", 0)))
+        except Exception as exc:
+            self._reason = (
+                "键鼠控制失败"
+                f"（{type(exc).__name__}）。Windows 请确认连接器和目标程序处于同一用户会话及权限级别。"
+            )
+            raise DesktopError(proto.ERROR_NO_PERMISSION, self._reason) from exc
+
+
+def desktop_runtime_issues() -> list[str]:
+    """Return actionable local diagnostics for controlled desktop control."""
+    capture = _MssCapture()
+    input_backend = _PynputInput()
+    issues: list[str] = []
+    if not capture.available():
+        issues.append(_unavailable_reason(capture, "屏幕捕获不可用。"))
+    if not input_backend.available():
+        issues.append(_unavailable_reason(input_backend, "键鼠控制不可用。"))
+    return issues
 
 
 def default_controller(**kwargs: Any) -> DesktopController:

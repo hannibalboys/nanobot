@@ -14,6 +14,11 @@ dependencies = [
     "typer>=0.20.0,<1.0.0",
     "filelock>=3.25.2,<4.0.0",
     "keyring>=25.0.0,<26.0.0",
+    # Desktop control imports these lazily, but they are bundled with every
+    # connector install so enabling the feature cannot fail as a missing OS grant.
+    "mss>=10.1.0,<11.0.0",
+    "Pillow>=10.0.0,<12.0.0",
+    "pynput>=1.7.7,<2.0.0",
     # MCP client for the local MCP proxy bridge (add-connector-mcp-proxy). Only
     # exercised when the owner registers local MCP servers; imported lazily.
     "mcp>=1.26.0,<2.0.0",

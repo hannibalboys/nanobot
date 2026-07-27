@@ -45,6 +45,7 @@ dist/
 build/
 *.manifest
 *.spec
+!connector/packaging/nanobot-connector.spec
 pip-wheel-metadata/
 share/python-wheels/
 

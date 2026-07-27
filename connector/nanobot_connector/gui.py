@@ -611,7 +611,11 @@ class ConnectorGui:
 
         ttk.Label(
             tab,
-            text="注意：首次使用需在系统设置中授予本程序「屏幕录制 / 辅助功能」权限。",
+            text=(
+                "注意：Windows 10/11 没有单独的“屏幕录制”授权页。启用后还需要在“授权窗口”"
+                "临时授权桌面控制，并让连接器运行在当前已登录用户的桌面会话中；macOS 才需要"
+                "在系统设置中授予屏幕录制和辅助功能权限。"
+            ),
             wraplength=560,
             foreground="#b45309",
         ).pack(anchor=tk.W, pady=(16, 0))

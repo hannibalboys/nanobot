@@ -41,6 +41,16 @@ class FakeInput:
         self.injected.append(action)
 
 
+class ReasonCapture(FakeCapture):
+    def unavailable_reason(self):
+        return "缺少桌面截屏依赖"
+
+
+class ReasonInput(FakeInput):
+    def unavailable_reason(self):
+        return "缺少键鼠控制依赖"
+
+
 def _controller(**kwargs):
     return DesktopController(
         capture_backend=kwargs.pop("capture", FakeCapture()),
@@ -90,6 +100,18 @@ async def test_no_permission_refuses_start():
     with pytest.raises(DesktopError) as ei:
         await ctl.start_session("s1", operator="webui", goal="x")
     assert ei.value.code == "no_permission"
+
+
+async def test_start_reports_capture_backend_diagnostic():
+    ctl = _controller(capture=ReasonCapture(ok=False), on_local_authorize=_approve)
+    with pytest.raises(DesktopError, match="缺少桌面截屏依赖"):
+        await ctl.start_session("s1", operator="webui", goal="x")
+
+
+async def test_start_requires_input_backend():
+    ctl = _controller(input=ReasonInput(ok=False), on_local_authorize=_approve)
+    with pytest.raises(DesktopError, match="缺少键鼠控制依赖"):
+        await ctl.start_session("s1", operator="webui", goal="x")
 
 
 async def test_full_session_capture_and_inject():
