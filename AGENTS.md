@@ -64,6 +64,7 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 - Architecture constraints: [`.agent/design.md`](.agent/design.md)
 - Security boundaries: [`.agent/security.md`](.agent/security.md)
 - Common gotchas: [`.agent/gotchas.md`](.agent/gotchas.md)
+- Upstream sync baseline: `HKUDS/nanobot:main` @ `2bdb11ee`（2026-08-19 合并，merge commit `a22b0b0a`）；后续同步流程见 openspec 提案 `merge-upstream-main`（已归档）
 
 ## Contribution Flow
 
