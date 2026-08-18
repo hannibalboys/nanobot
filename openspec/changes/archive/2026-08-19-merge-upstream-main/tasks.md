@@ -25,6 +25,6 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 验证通过后推送 `origin dev`；失败则按 design.md 回滚方案处置并记录
-- [ ] 4.2 在 `AGENTS.md` 或 docs 中记录新的上游同步基线提交
-- [ ] 4.3 归档本提案（`openspec archive merge-upstream-main`）
+- [x] 4.1 验证通过后推送 `origin dev`；失败则按 design.md 回滚方案处置并记录
+- [x] 4.2 在 `AGENTS.md` 或 docs 中记录新的上游同步基线提交
+- [x] 4.3 归档本提案（`openspec archive merge-upstream-main`）
