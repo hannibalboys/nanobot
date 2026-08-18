@@ -14,7 +14,6 @@ import { cn } from "@/lib/utils";
 
 export interface ModelPresetOption {
   name: string;
-  label: string;
   model?: string | null;
   provider?: string | null;
 }
@@ -99,7 +98,6 @@ export function ModelPresetBadge({
   const activePreset: ModelPresetOption = {
     ...(listedIndex >= 0 ? modelPresets[listedIndex] : undefined),
     name: activeName,
-    label: label || modelPresets[listedIndex]?.label || activeName,
     model: modelDetail ?? modelPresets[listedIndex]?.model,
     provider: provider || modelPresets[listedIndex]?.provider,
   };
@@ -225,7 +223,7 @@ export function ModelPresetBadge({
       aria-valuemax={canSwitch ? presets.length - 1 : undefined}
       aria-valuemin={canSwitch ? 0 : undefined}
       aria-valuenow={canSwitch ? previewIndex : undefined}
-      aria-valuetext={canSwitch ? previewPreset?.label || label : undefined}
+      aria-valuetext={canSwitch ? previewPreset?.name || label : undefined}
       role={canSwitch ? "spinbutton" : undefined}
       type={interactive || canSwitch ? "button" : undefined}
       onClick={interactive ? onClick : undefined}
@@ -290,7 +288,7 @@ export function ModelPresetBadge({
               return (
                 <PresetPill
                   key={virtualIndex}
-                  label={preset.label || preset.name}
+                  label={preset.name}
                   modelDetail={preset.model}
                   provider={preset.provider}
                   isHero={isHero}
@@ -359,7 +357,7 @@ function PresetPill({
       data-preset-offset={offset}
       title={fallbackModelName || title || undefined}
       className={cn(
-        "composer-model-badge composer-model-pill inline-flex h-full w-fit max-w-full min-w-0 shrink-0 items-center rounded-full border border-border/55 bg-card font-semibold text-foreground/58",
+        "composer-model-badge composer-model-pill inline-flex h-full w-fit max-w-full min-w-0 shrink-0 items-center rounded-full border border-border/55 bg-card font-medium text-foreground/70",
         offset === undefined && "shadow-[0_2px_8px_rgba(15,23,42,0.045)]",
         "transition-[color,background-color,border-color,transform] duration-150 ease-out group-focus-visible/model-badge:ring-2 group-focus-visible/model-badge:ring-ring/45",
         needsSetup && "border-amber-500/35 bg-amber-50/70 text-amber-900 dark:bg-amber-500/10 dark:text-amber-200",

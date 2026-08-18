@@ -266,6 +266,7 @@ def test_disabled_skills_excluded_from_list(tmp_path: Path) -> None:
     assert len(entries) == 1
     assert entries[0]["name"] == "beta"
     assert entries[0]["path"] == str(beta_path)
+    assert loader.load_skill("alpha") is None
 
 
 def test_disabled_skills_empty_set_no_effect(tmp_path: Path) -> None:
@@ -349,6 +350,37 @@ def test_disabled_skills_excluded_from_get_always_skills(tmp_path: Path) -> None
     always = loader.get_always_skills()
     assert "alpha" not in always
     assert "beta" in always
+
+
+def test_explicit_skill_references_resolve_available_enabled_names_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "ws"
+    skills_root = workspace / "skills"
+    skills_root.mkdir(parents=True)
+    _write_skill(skills_root, "alpha", body="# Alpha")
+    _write_skill(skills_root, "beta", body="# Beta")
+    _write_skill(
+        skills_root,
+        "blocked",
+        metadata_json={"requires": {"env": ["MISSING_SKILL_TEST_ENV"]}},
+        body="# Blocked",
+    )
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    monkeypatch.delenv("MISSING_SKILL_TEST_ENV", raising=False)
+    loader = SkillsLoader(
+        workspace,
+        builtin_skills_dir=builtin,
+        disabled_skills={"beta"},
+    )
+
+    invoked = loader.get_explicitly_invoked_skills(
+        "Use $alpha, then $unknown, $alpha again, $beta, and $blocked."
+    )
+
+    assert invoked == ["alpha"]
 
 
 # -- multiline description tests (YAML folded > and literal |) -----------------

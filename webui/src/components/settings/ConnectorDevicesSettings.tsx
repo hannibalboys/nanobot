@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { CircleAlert, Download, Laptop, Loader2, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { SettingsSectionTitle } from "@/components/settings/shared/SettingsControls";
 import {
   createConnectorPairingCode,
   fetchConnectorDownloads,
@@ -99,6 +100,9 @@ export function ConnectorDevicesSettings({ allowExec = false }: { allowExec?: bo
 
   return (
     <div className="space-y-6">
+      <SettingsSectionTitle>
+        {t("settings.nav.devices", { defaultValue: "Devices" })}
+      </SettingsSectionTitle>
       <section className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <p className="max-w-[680px] text-[13px] leading-5 text-muted-foreground">
           {t("settings.devices.description", {

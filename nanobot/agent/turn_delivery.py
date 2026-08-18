@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import (
@@ -19,6 +19,9 @@ from nanobot.bus.outbound_events import (
 from nanobot.bus.progress import build_bus_progress_callback
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus, RuntimeEventPublisher
+
+if TYPE_CHECKING:
+    from nanobot.utils.llm_runtime import LLMRuntime
 
 
 @dataclass(frozen=True)
@@ -62,7 +65,7 @@ class TurnDeliveryFactory:
         route = self._default_route(msg, session_key)
         if self.route_policy is not None:
             route = self.route_policy(msg, session_key, route)
-            if not isinstance(route, TurnRoute):
+            if not isinstance(cast(object, route), TurnRoute):
                 raise TypeError("turn route policy must return TurnRoute")
         return TurnDelivery(
             bus=self.bus,
@@ -186,11 +189,22 @@ class TurnDelivery:
                 started_at=started_at,
             )
 
-    def record_runtime(self, runtime: Any) -> None:
+    async def runtime_admitted(self, runtime: LLMRuntime) -> None:
+        """Record the immutable runtime and expose it at the lifecycle seam."""
+        if self.route.publish_lifecycle:
+            await self.runtime_event_publisher.turn_runtime_admitted(
+                self.delivery_message,
+                self.session_key,
+                runtime,
+            )
+            return
         self.runtime_event_publisher.record_turn_runtime(self.session_key, runtime)
 
     def record_latency(self, latency_ms: int | None) -> None:
         self.runtime_event_publisher.record_turn_latency(self.session_key, latency_ms)
+
+    def record_usage(self, usage: Mapping[str, int]) -> None:
+        self.runtime_event_publisher.record_turn_usage(self.session_key, usage)
 
     def background_response(
         self,
