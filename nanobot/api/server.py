@@ -46,10 +46,28 @@ API_SESSION_KEY = "api:default"
 API_CHAT_ID = "default"
 _AGENT_LOOP_KEY = web.AppKey[Any]("agent_loop")
 _MODEL_NAME_KEY = web.AppKey[str]("model_name")
+_MODEL_NAME_RESOLVER_KEY = web.AppKey[Callable[[], str | None] | None]("model_name_resolver")
 _REQUEST_TIMEOUT_KEY = web.AppKey[float]("request_timeout")
 _SESSION_LOCKS_KEY = web.AppKey[dict[str, asyncio.Lock]]("session_locks")
 _PREPARE_AGENT_KEY = web.AppKey[Callable[[], Awaitable[None]] | None]("prepare_agent")
 _MISSING = object()
+
+
+def _resolve_model_name(app: Any) -> str:
+    """Report the current model, preferring a live resolver over the startup value."""
+    fallback = _app_value(app, _MODEL_NAME_KEY, "model_name", "nanobot")
+    resolver: Callable[[], str | None] | None = _app_value(
+        app,
+        _MODEL_NAME_RESOLVER_KEY,
+        "model_name_resolver",
+        None,
+    )
+    if resolver is None:
+        return fallback
+    try:
+        return resolver() or fallback
+    except Exception:  # noqa: BLE001 - model reporting must never fail the request
+        return fallback
 
 
 def _app_value(
@@ -288,7 +306,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
         "request_timeout",
         120.0,
     )
-    model_name: str = _app_value(request.app, _MODEL_NAME_KEY, "model_name", "nanobot")
+    model_name: str = _resolve_model_name(request.app)
 
     stream = False
     try:
@@ -327,7 +345,10 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
 
     logger.info(
         "API request session_key={} media={} text={} stream={}",
-        session_key, len(media_paths), text[:80], stream,
+        session_key,
+        len(media_paths),
+        text[:80],
+        stream,
     )
     # -- streaming path --
     if stream:
@@ -425,13 +446,15 @@ async def handle_chat_completions(request: web.Request) -> web.Response | web.St
         return _error_json(500, "Internal server error", err_type="server_error")
 
     return web.json_response(
-        _chat_completion_response(response_text, model_name, getattr(agent_loop, "_last_usage", None))
+        _chat_completion_response(
+            response_text, model_name, getattr(agent_loop, "_last_usage", None)
+        )
     )
 
 
 async def handle_models(request: web.Request) -> web.Response:
     """GET /v1/models"""
-    model_name = _app_value(request.app, _MODEL_NAME_KEY, "model_name", "nanobot")
+    model_name = _resolve_model_name(request.app)
     return web.json_response(
         {
             "object": "list",
@@ -463,6 +486,7 @@ def create_app(
     request_timeout: float = 120.0,
     api_key: str = "",
     prepare_agent: Callable[[], Awaitable[None]] | None = None,
+    model_name_resolver: Callable[[], str | None] | None = None,
 ) -> web.Application:
     """Create the aiohttp application.
 
@@ -472,10 +496,14 @@ def create_app(
         request_timeout: Per-request timeout in seconds.
         api_key: Optional API key for Bearer-token authentication on API routes.
         prepare_agent: Optional application-owned readiness callback run before each turn.
+        model_name_resolver: Optional live model lookup; when set, requests report the
+            model this returns (falling back to ``model_name``) so provider config
+            changes apply without restarting the server.
     """
     app = web.Application(client_max_size=20 * 1024 * 1024)  # 20MB for base64 images
     app[_AGENT_LOOP_KEY] = agent_loop
     app[_MODEL_NAME_KEY] = model_name
+    app[_MODEL_NAME_RESOLVER_KEY] = model_name_resolver
     app[_REQUEST_TIMEOUT_KEY] = request_timeout
     app[_SESSION_LOCKS_KEY] = {}  # per-user locks, keyed by session_key
     app[_PREPARE_AGENT_KEY] = prepare_agent
@@ -493,7 +521,7 @@ def create_app(
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return _error_json(401, "Missing Authorization header. Use: Bearer <api_key>")
-        if not hmac.compare_digest(auth[len("Bearer "):], api_key):
+        if not hmac.compare_digest(auth[len("Bearer ") :], api_key):
             return _error_json(401, "Invalid API key")
         return await handler(request)
 

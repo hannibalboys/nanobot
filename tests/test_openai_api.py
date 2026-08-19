@@ -248,6 +248,60 @@ async def test_model_mismatch_returns_400() -> None:
     assert "test-model" in body["error"]["message"]
 
 
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_model_name_resolver_reports_live_model(aiohttp_client, mock_agent) -> None:
+    current = {"name": "hot-model-a"}
+    app = create_app(
+        mock_agent,
+        model_name="startup-model",
+        api_key=API_KEY,
+        model_name_resolver=lambda: current["name"],
+    )
+    client = await aiohttp_client(app)
+
+    models = await client.get("/v1/models", headers=AUTH_HEADERS)
+    assert models.status == 200
+    assert (await models.json())["data"][0]["id"] == "hot-model-a"
+
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers=AUTH_HEADERS,
+        json={
+            "model": "hot-model-a",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    assert resp.status == 200
+    assert (await resp.json())["model"] == "hot-model-a"
+
+    # Config change flips the reported model without recreating the app.
+    current["name"] = "hot-model-b"
+    models = await client.get("/v1/models", headers=AUTH_HEADERS)
+    assert (await models.json())["data"][0]["id"] == "hot-model-b"
+
+
+@pytest.mark.skipif(not HAS_AIOHTTP, reason="aiohttp not installed")
+@pytest.mark.asyncio
+async def test_model_name_resolver_failure_falls_back_to_startup_name(
+    aiohttp_client, mock_agent
+) -> None:
+    def _boom() -> str:
+        raise RuntimeError("runtime unavailable")
+
+    app = create_app(
+        mock_agent,
+        model_name="startup-model",
+        api_key=API_KEY,
+        model_name_resolver=_boom,
+    )
+    client = await aiohttp_client(app)
+
+    models = await client.get("/v1/models", headers=AUTH_HEADERS)
+    assert models.status == 200
+    assert (await models.json())["data"][0]["id"] == "startup-model"
+
+
 @pytest.mark.asyncio
 async def test_single_user_message_required() -> None:
     request = MagicMock()

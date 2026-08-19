@@ -94,6 +94,7 @@ app.add_typer(create_config_app(), name="config")
 
 console = Console()
 
+
 def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} nanobot v{__version__}")
@@ -102,9 +103,7 @@ def version_callback(value: bool):
 
 @app.callback()
 def main(
-    version: bool = typer.Option(
-        None, "--version", "-v", callback=version_callback, is_eager=True
-    ),
+    version: bool = typer.Option(None, "--version", "-v", callback=version_callback, is_eager=True),
 ):
     """nanobot - Personal AI Assistant."""
     pass
@@ -120,7 +119,9 @@ def onboard(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
     wizard: bool = typer.Option(False, "--wizard", help="Use interactive wizard"),
-    non_interactive_refresh: bool = typer.Option(False, "--refresh", help="Refresh config, preserving existing settings without prompting"),
+    non_interactive_refresh: bool = typer.Option(
+        False, "--refresh", help="Refresh config, preserving existing settings without prompting"
+    ),
 ):
     """Initialize nanobot configuration and workspace."""
     from nanobot.config.loader import get_config_path, load_config, save_config, set_config_path
@@ -287,7 +288,9 @@ def _read_trigger_cli_message(message: str | None) -> str:
 @app.command()
 def trigger(
     trigger_id: str = typer.Argument(..., help="Trigger ID returned by /trigger"),
-    message: str | None = typer.Argument(None, help="Message to deliver; stdin is used when omitted"),
+    message: str | None = typer.Argument(
+        None, help="Message to deliver; stdin is used when omitted"
+    ),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
@@ -322,7 +325,9 @@ def trigger(
 def serve(
     port: int | None = typer.Option(None, "--port", "-p", help="API server port"),
     host: str | None = typer.Option(None, "--host", "-H", help="Bind address"),
-    timeout: float | None = typer.Option(None, "--timeout", "-t", help="Per-request timeout (seconds)"),
+    timeout: float | None = typer.Option(
+        None, "--timeout", "-t", help="Per-request timeout (seconds)"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show nanobot runtime logs"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
@@ -336,6 +341,9 @@ def serve(
 
     from nanobot.api.server import create_app
     from nanobot.bus.queue import MessageBus
+    from nanobot.config.loader import get_config_path
+    from nanobot.config.watcher import watch_config_file
+    from nanobot.providers.factory import ProviderSnapshot, load_provider_snapshot
     from nanobot.providers.image_generation import image_gen_provider_configs
     from nanobot.session.manager import SessionManager
 
@@ -358,13 +366,37 @@ def serve(
     session_manager = SessionManager(runtime_config.workspace_path)
     tools = ToolRegistry()
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
+
+    # Hot reload: re-read provider settings from disk when config.json changes,
+    # mirroring the gateway. Failed reloads keep the last good snapshot instead
+    # of breaking in-flight serving.
+    _last_good_snapshots: dict[str | None, ProviderSnapshot] = {}
+
+    def _load_serve_provider_snapshot(*args: Any, **kwargs: Any) -> ProviderSnapshot:
+        preset_name = kwargs.get("preset_name")
+        try:
+            snapshot = load_provider_snapshot(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - keep serving on bad config edits
+            cached = _last_good_snapshots.get(preset_name)
+            if cached is not None:
+                logger.warning(
+                    "Config reload failed ({}); keeping previous provider settings",
+                    exc,
+                )
+                return cached
+            raise
+        _last_good_snapshots[preset_name] = snapshot
+        return snapshot
+
     try:
         agent_loop = AgentLoop.from_config(
-            runtime_config, bus,
+            runtime_config,
+            bus,
             session_manager=session_manager,
             image_generation_provider_configs=image_gen_provider_configs(runtime_config),
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
+            provider_snapshot_loader=_load_serve_provider_snapshot,
         )
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -378,21 +410,41 @@ def serve(
     console.print(f"  [cyan]Timeout[/cyan]  : {timeout}s")
     if not is_loopback_host(host):
         console.print(
-            "[yellow]API is available beyond this device "
-            "(authentication required).[/yellow]"
+            "[yellow]API is available beyond this device (authentication required).[/yellow]"
         )
     console.print()
 
+    config_file = get_config_path()
+
+    def _on_config_change() -> None:
+        logger.info(
+            "Config file changed ({}); provider settings refresh on the next request",
+            config_file,
+        )
+        agent_loop.invalidate_runtime_config()
+
     api_app = create_app(
-        agent_loop, model_name=model_name, request_timeout=timeout,
+        agent_loop,
+        model_name=model_name,
+        request_timeout=timeout,
         api_key=api_key,
         prepare_agent=mcp_provider.connect,
+        model_name_resolver=lambda: agent_loop.llm_runtime().model,
     )
 
-    async def on_startup(_app: Any) -> None:
+    async def on_startup(app: Any) -> None:
         await mcp_provider.connect()
+        app["nanobot_config_watcher"] = asyncio.create_task(
+            watch_config_file(config_file, _on_config_change),
+            name="nanobot-serve-config-watcher",
+        )
 
-    async def on_cleanup(_app: Any) -> None:
+    async def on_cleanup(app: Any) -> None:
+        watcher_task = app.get("nanobot_config_watcher")
+        if watcher_task is not None:
+            watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher_task
         try:
             await agent_loop.aclose()
         finally:
@@ -522,7 +574,9 @@ def channels_status(
 @channels_app.command("login")
 def channels_login(
     channel_name: str = typer.Argument(..., help="Channel name (e.g. weixin, whatsapp)"),
-    force: bool = typer.Option(False, "--force", "-f", help="Force re-authentication even if already logged in"),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Force re-authentication even if already logged in"
+    ),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Authenticate with a channel via QR code or other interactive login."""
@@ -645,7 +699,9 @@ def status(
 
     console.print(f"{__logo__} nanobot Status\n")
 
-    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
+    console.print(
+        f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}"
+    )
     console.print(
         f"Workspace: {workspace_path} "
         f"{'[green]✓[/green]' if workspace_path.exists() else '[red]✗[/red]'}"
@@ -693,7 +749,9 @@ def status(
                     console.print(f"{spec.label}: [dim]not set[/dim]")
             else:
                 has_key = bool(resolve_env_refs(p.api_key or ""))
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+                console.print(
+                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}"
+                )
 
         if provider_ready:
             console.print()
