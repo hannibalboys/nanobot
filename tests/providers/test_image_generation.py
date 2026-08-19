@@ -102,6 +102,22 @@ class CodexStreamingCompleteThenErrorResponse(FakeResponse):
         )
 
 
+@pytest.fixture(autouse=True)
+def generated_image_downloads(monkeypatch) -> list[tuple[str, str | None]]:
+    """Keep provider response parsing tests independent from outbound HTTP."""
+    downloads: list[tuple[str, str | None]] = []
+
+    async def download(url: str, *, proxy: str | None = None) -> str:
+        downloads.append((url, proxy))
+        return PNG_DATA_URL
+
+    monkeypatch.setattr(
+        "nanobot.providers.image_generation._download_image_data_url",
+        download,
+    )
+    return downloads
+
+
 @pytest.mark.asyncio
 async def test_openrouter_image_generation_payload_and_response(tmp_path: Path) -> None:
     ref = tmp_path / "ref.png"
@@ -277,18 +293,22 @@ async def test_aihubmix_image_edit_payload_uses_reference_images(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_aihubmix_image_generation_downloads_url_response() -> None:
+async def test_aihubmix_image_generation_downloads_url_response(
+    generated_image_downloads: list[tuple[str, str | None]],
+) -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
+    proxy = "http://127.0.0.1:23458"
     client = AIHubMixImageGenerationClient(
         api_key="sk-ahm-test",
+        proxy=proxy,
         client=fake,  # type: ignore[arg-type]
     )
 
     response = await client.generate(prompt="draw", model="gpt-image-2-free")
 
     assert response.images[0].startswith("data:image/png;base64,")
-    assert fake.get_calls[0]["url"] == "https://cdn.example/image.png"
+    assert generated_image_downloads == [("https://cdn.example/image.png", proxy)]
 
 
 @pytest.mark.asyncio
@@ -444,7 +464,7 @@ async def test_gemini_flash_forwards_aspect_ratio_and_image_size() -> None:
         image_size="2K",
     )
 
-    image_config = fake.calls[0]["json"]["generationConfig"]["responseFormat"]["image"]
+    image_config = fake.calls[0]["json"]["generationConfig"]["imageConfig"]
     assert image_config == {"aspectRatio": "16:9", "imageSize": "2K"}
 
 
@@ -460,7 +480,7 @@ async def test_gemini_flash_2_5_drops_image_size() -> None:
         image_size="1K",
     )
 
-    image_config = fake.calls[0]["json"]["generationConfig"]["responseFormat"]["image"]
+    image_config = fake.calls[0]["json"]["generationConfig"]["imageConfig"]
     assert image_config == {"aspectRatio": "4:3"}
 
 
@@ -476,7 +496,7 @@ async def test_gemini_flash_2_0_drops_image_size() -> None:
         image_size="1K",
     )
 
-    image_config = fake.calls[0]["json"]["generationConfig"]["responseFormat"]["image"]
+    image_config = fake.calls[0]["json"]["generationConfig"]["imageConfig"]
     assert image_config == {"aspectRatio": "16:9"}
 
 
@@ -504,8 +524,8 @@ async def test_gemini_flash_scopes_extreme_aspect_ratios_by_model(
         aspect_ratio=aspect_ratio,
     )
 
-    response_format = fake.calls[0]["json"]["generationConfig"].get("responseFormat")
-    assert response_format == ({"image": expected} if expected else None)
+    image_config = fake.calls[0]["json"]["generationConfig"].get("imageConfig")
+    assert image_config == expected
 
 
 @pytest.mark.parametrize(
@@ -533,8 +553,8 @@ async def test_gemini_flash_scopes_image_size_by_model(
         image_size=image_size,
     )
 
-    response_format = fake.calls[0]["json"]["generationConfig"].get("responseFormat")
-    assert response_format == ({"image": expected} if expected else None)
+    image_config = fake.calls[0]["json"]["generationConfig"].get("imageConfig")
+    assert image_config == expected
 
 
 @pytest.mark.asyncio
@@ -551,7 +571,7 @@ async def test_gemini_flash_ignores_unsupported_hints() -> None:
         image_size="1024x1024",
     )
 
-    assert "responseFormat" not in fake.calls[0]["json"]["generationConfig"]
+    assert "imageConfig" not in fake.calls[0]["json"]["generationConfig"]
 
 
 @pytest.mark.asyncio
@@ -818,18 +838,22 @@ async def test_openai_b64_json_response_uses_detected_mime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_url_download_fallback() -> None:
+async def test_openai_url_download_fallback(
+    generated_image_downloads: list[tuple[str, str | None]],
+) -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
+    proxy = "http://127.0.0.1:23458"
     client = OpenAIImageGenerationClient(
         api_key="sk-openai-test",
+        proxy=proxy,
         client=fake,  # type: ignore[arg-type]
     )
 
     response = await client.generate(prompt="draw", model="dall-e-3")
 
     assert response.images[0].startswith("data:image/png;base64,")
-    assert fake.get_calls[0]["url"] == "https://cdn.example/image.png"
+    assert generated_image_downloads == [("https://cdn.example/image.png", proxy)]
 
 
 @pytest.mark.asyncio
@@ -1192,13 +1216,17 @@ async def test_custom_generate_maps_one_k_to_openai_dimension() -> None:
 
 
 @pytest.mark.asyncio
-async def test_custom_generate_extra_body_can_override_defaults() -> None:
+async def test_custom_generate_extra_body_can_override_defaults(
+    generated_image_downloads: list[tuple[str, str | None]],
+) -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://images.example/cat.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
+    proxy = "http://127.0.0.1:23458"
     client = CustomImageGenerationClient(
         api_key="sk-custom-test",
         api_base="https://custom.example/v1",
         extra_body={"response_format": "url", "size": "2K"},
+        proxy=proxy,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1208,9 +1236,8 @@ async def test_custom_generate_extra_body_can_override_defaults() -> None:
         image_size="1K",
     )
 
-    expected_data_url = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode('ascii')}"
-    assert response.images == [expected_data_url]
-    assert fake.get_calls[0]["url"] == "https://images.example/cat.png"
+    assert response.images == [PNG_DATA_URL]
+    assert generated_image_downloads == [("https://images.example/cat.png", proxy)]
     body = fake.calls[0]["json"]
     assert body["response_format"] == "url"
     assert body["size"] == "2K"
@@ -1616,18 +1643,22 @@ async def test_zhipu_image_generation_with_explicit_size() -> None:
 
 
 @pytest.mark.asyncio
-async def test_zhipu_image_generation_downloads_url_response() -> None:
+async def test_zhipu_image_generation_downloads_url_response(
+    generated_image_downloads: list[tuple[str, str | None]],
+) -> None:
     fake = FakeClient(FakeResponse({"data": [{"url": "https://cdn.example/image.png"}]}))
     fake.get_response = FakeResponse({}, content=PNG_BYTES)
+    proxy = "http://127.0.0.1:23458"
     client = ZhipuImageGenerationClient(
         api_key="sk-zhipu-test",
+        proxy=proxy,
         client=fake,  # type: ignore[arg-type]
     )
 
     response = await client.generate(prompt="draw", model="glm-image")
 
     assert response.images[0].startswith("data:image/png;base64,")
-    assert fake.get_calls[0]["url"] == "https://cdn.example/image.png"
+    assert generated_image_downloads == [("https://cdn.example/image.png", proxy)]
 
 
 @pytest.mark.asyncio
@@ -1707,7 +1738,9 @@ def _modelscope_fast_poll(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_modelscope_image_generation_submit_and_poll() -> None:
+async def test_modelscope_image_generation_submit_and_poll(
+    generated_image_downloads: list[tuple[str, str | None]],
+) -> None:
     submit = FakeResponse({"task_id": "abc123"})
     poll_responses = [
         FakeResponse({"task_status": "PENDING"}),
@@ -1717,9 +1750,11 @@ async def test_modelscope_image_generation_submit_and_poll() -> None:
         }),
     ]
     fake = ModelScopeFakeClient(submit, poll_responses)
+    proxy = "http://127.0.0.1:23458"
     client = ModelScopeImageGenerationClient(
         api_key="ms-token",
         api_base="https://api-inference.modelscope.cn/v1",
+        proxy=proxy,
         client=fake,  # type: ignore[arg-type]
     )
 
@@ -1729,6 +1764,7 @@ async def test_modelscope_image_generation_submit_and_poll() -> None:
     )
 
     assert response.images[0].startswith("data:image/png;base64,")
+    assert generated_image_downloads == [("https://cdn.example/image.png", proxy)]
 
     # Verify POST request
     post_call = fake.calls[0]
@@ -1898,3 +1934,18 @@ async def test_modelscope_image_generation_poll_timeout(monkeypatch) -> None:
 
     # Should have polled up to the (patched) attempt limit.
     assert len(fake.get_calls) == 3
+
+
+
+def test_image_provider_http_client_kwargs_include_explicit_proxy() -> None:
+    proxy = "http://127.0.0.1:23458"
+    client = AIHubMixImageGenerationClient(
+        api_key="sk-ahm-test",
+        proxy=proxy,
+    )
+
+    assert client._http_client_kwargs() == {
+        "timeout": client.timeout,
+        "proxy": proxy,
+        "trust_env": False,
+    }

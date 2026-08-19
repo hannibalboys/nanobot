@@ -11,6 +11,11 @@ nanobot is a lightweight, open-source AI agent framework written in Python with 
 pytest tests/test_openai_api.py::test_function -v
 ruff check nanobot/
 
+# Strict type checking (matches CI)
+uv sync --all-extras --dev
+uv run --no-sync python -m scripts.install_channel_dependencies --all-channels
+uv run --no-sync basedpyright
+
 # WebUI: dev server (proxies API/WS to gateway :8765), build, test
 # Build outputs to ../nanobot/web/dist (bundled into the Python wheel)
 cd webui && bun run dev      # or NANOBOT_API_URL=... bun run dev
@@ -59,6 +64,7 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 - Architecture constraints: [`.agent/design.md`](.agent/design.md)
 - Security boundaries: [`.agent/security.md`](.agent/security.md)
 - Common gotchas: [`.agent/gotchas.md`](.agent/gotchas.md)
+- Upstream sync baseline: `HKUDS/nanobot:main` @ `2bdb11ee`（2026-08-19 合并，merge commit `a22b0b0a`）；后续同步流程见 openspec 提案 `merge-upstream-main`（已归档）
 
 ## Contribution Flow
 

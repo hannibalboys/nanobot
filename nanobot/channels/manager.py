@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -41,7 +41,9 @@ from nanobot.utils.restart import (
 )
 
 if TYPE_CHECKING:
+    from nanobot.cron.service import CronService
     from nanobot.session.manager import SessionManager
+    from nanobot.triggers.local_store import LocalTriggerStore
 
 
 def _default_webui_dist() -> Path | None:
@@ -90,32 +92,46 @@ class ChannelManager:
         bus: MessageBus,
         *,
         session_manager: "SessionManager | None" = None,
-        cron_service: Any | None = None,
-        local_trigger_store: Any | None = None,
+        cron_service: CronService | None = None,
+        local_trigger_store: LocalTriggerStore | None = None,
         webui_runtime_model_name: Callable[[], str | None] | None = None,
+        webui_refresh_runtime_config: Callable[[], None] | None = None,
         webui_cron_pending_job_ids: Callable[[str], set[str]] | None = None,
         webui_local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
         webui_static_dist: bool = True,
         webui_runtime_surface: str = "browser",
         webui_runtime_capabilities: dict[str, Any] | None = None,
+        webui_mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
+        webui_mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+        webui_skill_state_action: Callable[[set[str]], None] | None = None,
+        config_path: Path | None = None,
     ):
+        if config_path is None:
+            from nanobot.config.loader import get_config_path
+
+            config_path = get_config_path()
         self.config = config
+        self._config_path = config_path.expanduser().resolve(strict=False)
         self.bus = bus
         self._session_manager = session_manager
         self._cron_service = cron_service
         self._local_trigger_store = local_trigger_store
         self._webui_runtime_model_name = webui_runtime_model_name
+        self._webui_refresh_runtime_config = webui_refresh_runtime_config
         self._webui_cron_pending_job_ids = webui_cron_pending_job_ids
         self._webui_local_trigger_pending_ids = webui_local_trigger_pending_ids
         self._webui_static_dist = webui_static_dist
         self._webui_runtime_surface = webui_runtime_surface
         self._webui_runtime_capabilities = dict(webui_runtime_capabilities or {})
+        self._webui_mcp_runtime_status = webui_mcp_runtime_status
+        self._webui_mcp_reload = webui_mcp_reload
+        self._webui_skill_state_action = webui_skill_state_action
         self.channels: dict[str, BaseChannel] = {}
         self._channel_owners: dict[str, str] = {}
         self._channel_runtime_specs: dict[str, tuple[str, str]] = {}
         self._channel_errors: dict[str, str] = {}
-        self._channel_tasks: dict[str, asyncio.Task] = {}
-        self._dispatch_task: asyncio.Task | None = None
+        self._channel_tasks: dict[str, asyncio.Task[None]] = {}
+        self._dispatch_task: asyncio.Task[None] | None = None
         self._started = False
         self._origin_reply_fingerprints: dict[tuple[str, str, str], str] = {}
 
@@ -166,8 +182,10 @@ class ChannelManager:
                 static_dist_path=static_path,
                 workspace_path=workspace,
                 default_restrict_to_workspace=self.config.tools.restrict_to_workspace,
+                config_path=self._config_path,
                 disabled_skills=set(self.config.agents.defaults.disabled_skills),
                 runtime_model_name=self._webui_runtime_model_name,
+                refresh_runtime_config=self._webui_refresh_runtime_config,
                 runtime_surface=self._webui_runtime_surface,
                 runtime_capabilities_overrides=self._webui_runtime_capabilities,
                 cron_service=self._cron_service,
@@ -177,17 +195,24 @@ class ChannelManager:
                 channel_feature_action=self.apply_channel_feature_action,
                 channel_runtime_status=self.get_status,
                 connector_config=self.config.connector,
+                mcp_runtime_status=self._webui_mcp_runtime_status,
+                mcp_reload=self._webui_mcp_reload,
+                skill_state_action=self._webui_skill_state_action,
                 logger=logger,
             )
             kwargs["gateway"] = gateway
         channel = cls(section, self.bus, **kwargs)
         if runtime_name and runtime_name != channel.name:
             channel.name = runtime_name
+        progress_default, tool_hints_default = channel.progress_transport_defaults() or (
+            self.config.channels.send_progress,
+            self.config.channels.send_tool_hints,
+        )
         channel.send_progress = self._resolve_bool_override(
-            section, "send_progress", self.config.channels.send_progress,
+            section, "send_progress", progress_default,
         )
         channel.send_tool_hints = self._resolve_bool_override(
-            section, "send_tool_hints", self.config.channels.send_tool_hints,
+            section, "send_tool_hints", tool_hints_default,
         )
         channel.show_reasoning = self._resolve_bool_override(
             section, "show_reasoning", self.config.channels.show_reasoning,
@@ -292,10 +317,11 @@ class ChannelManager:
         for name, ch in self.channels.items():
             cfg = ch.config
             if isinstance(cfg, dict):
-                if "allow_from" in cfg:
-                    allow = cfg.get("allow_from")
+                config_data = cast(dict[str, Any], cfg)
+                if "allow_from" in config_data:
+                    allow = config_data.get("allow_from")
                 else:
-                    allow = cfg.get("allowFrom")
+                    allow = config_data.get("allowFrom")
             else:
                 allow = getattr(cfg, "allow_from", None)
             if allow is None:
@@ -322,11 +348,12 @@ class ChannelManager:
         Pydantic models.
         """
         if isinstance(section, dict):
-            value = section.get(key)
+            section_data = cast(dict[str, Any], section)
+            value = section_data.get(key)
             if value is None:
                 camel = _BOOL_CAMEL_ALIASES.get(key)
                 if camel:
-                    value = section.get(camel)
+                    value = section_data.get(camel)
             return value if isinstance(value, bool) else default
         value = getattr(section, key, None)
         return value if isinstance(value, bool) else default
@@ -341,11 +368,15 @@ class ChannelManager:
             await channel.start()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            errors[name] = "Channel failed to start. Check gateway logs."
-            logger.exception("Failed to start channel {}", name)
+        except Exception as exc:
+            public_error = channel.start_error_message(exc)
+            errors[name] = public_error or "Channel failed to start. Check gateway logs."
+            if public_error:
+                logger.error("Failed to start channel {}: {}", name, public_error)
+            else:
+                logger.exception("Failed to start channel {}", name)
 
-    def _start_channel_task(self, name: str, channel: BaseChannel) -> asyncio.Task:
+    def _start_channel_task(self, name: str, channel: BaseChannel) -> asyncio.Task[None]:
         logger.info("Starting {} channel...", name)
         task = asyncio.create_task(self._start_channel(name, channel))
         self._channel_tasks[name] = task
@@ -362,7 +393,8 @@ class ChannelManager:
             await channel.stop()
             logger.info("Stopped {} channel", name)
         except asyncio.CancelledError:
-            if asyncio.current_task() and asyncio.current_task().cancelling():
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
                 raise
             logger.debug("Channel {} stop task was already cancelled", name)
         except Exception:
@@ -554,7 +586,7 @@ class ChannelManager:
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
 
         # Start channels
-        tasks = []
+        tasks: list[asyncio.Task[None]] = []
         for name, channel in self.channels.items():
             tasks.append(self._start_channel_task(name, channel))
 
@@ -905,6 +937,14 @@ class ChannelManager:
             except asyncio.CancelledError:
                 raise  # Propagate cancellation for graceful shutdown
             except Exception as e:
+                if not channel.should_retry_send_error(e):
+                    logger.error(
+                        "Send to {} failed with a non-retryable {}: {}",
+                        msg.channel,
+                        type(e).__name__,
+                        e,
+                    )
+                    return
                 loop = asyncio.get_running_loop()
                 exhausted = (
                     attempt >= max_attempts

@@ -1,5 +1,7 @@
 """File system tools: read, write, edit, list."""
 
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
+
 import difflib
 import mimetypes
 import os
@@ -8,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
+from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
 from nanobot.agent.tools.schema import (
@@ -37,7 +40,7 @@ class _FsTool(Tool):
         return FileToolsConfig
 
     @classmethod
-    def enabled(cls, ctx: Any) -> bool:
+    def enabled(cls, ctx: ToolContext) -> bool:
         return ctx.config.file.enable
 
     def __init__(
@@ -77,7 +80,7 @@ class _FsTool(Tool):
         self._fallback_file_states = FileStates()
 
     @classmethod
-    def create(cls, ctx: Any) -> Tool:
+    def create(cls, ctx: ToolContext) -> Tool:
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
         agent_workspace = Path(ctx.workspace)
@@ -145,9 +148,31 @@ class _FsTool(Tool):
         )
 
     def _resolve_read(self, path: str) -> Path:
+        plugin_skill_dirs: list[Path] = []
+        if self._workspace is not None:
+            from nanobot.agent.plugins import enabled_agent_plugin_skill_dirs
+
+            try:
+                access = current_tool_workspace(
+                    self._workspace,
+                    restrict_to_workspace=self._restrict_to_workspace,
+                    sandbox_restricts_workspace=self._sandbox_restricts_workspace,
+                )
+                if self._effective_allowed_root(access.allowed_root) is not None:
+                    candidate = Path(path).expanduser()
+                    if not candidate.is_absolute() and access.project_path is not None:
+                        candidate = access.project_path / candidate
+                    plugin_skill_dirs = list(
+                        enabled_agent_plugin_skill_dirs(
+                            Path(self._workspace),
+                            requested_path=candidate.resolve(strict=False),
+                        )
+                    )
+            except (OSError, RuntimeError):
+                pass
         return self._resolve_with_extra(
             path,
-            self._extra_read_allowed_dirs,
+            [*self._extra_read_allowed_dirs, *plugin_skill_dirs],
             self._extra_read_allowed_files,
             include_media_dir=True,
             extra_files_require_allowed_root=True,
@@ -226,12 +251,10 @@ def _builtin_skill_read_path(path: str) -> Path | None:
     tool_parameters_schema(
         path=StringSchema("The file path to read"),
         offset=IntegerSchema(
-            1,
             description="Line number to start reading from (1-indexed, default 1)",
             minimum=1,
         ),
         limit=IntegerSchema(
-            2000,
             description="Maximum number of lines to read (default 2000)",
             minimum=1,
         ),
@@ -263,6 +286,8 @@ class ReadFileTool(_FsTool):
             "Text output format: LINE_NUM|CONTENT. "
             "Images return visual content for analysis. "
             "Supports PDF, DOCX, XLSX, PPTX documents. "
+            "Uploaded non-image attachments are referenced by path; read them "
+            "with this tool only when their contents are needed. "
             "Use find_files/list_dir first when the path is uncertain. "
             "Read the relevant range before editing so replacements or patches "
             "are based on current content. "
@@ -368,11 +393,25 @@ class ReadFileTool(_FsTool):
             try:
                 text_content = raw.decode("utf-8")
             except UnicodeDecodeError:
-                # Binary file - return error message
-                mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
-                if mime and mime.startswith("image/"):
-                    return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
-                return ToolResult.error(f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported.")
+                # Match the former eager extractor for known text formats while
+                # keeping arbitrary binary files on the guarded error path.
+                from nanobot.utils.document import _is_text_extension
+
+                if _is_text_extension(fp.suffix.lower()):
+                    text_content = raw.decode("latin-1")
+                else:
+                    mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+                    if mime and mime.startswith("image/"):
+                        return build_image_content_blocks(
+                            raw,
+                            mime,
+                            str(fp),
+                            f"(Image file: {path})",
+                        )
+                    return ToolResult.error(
+                        f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). "
+                        "Only supported text files and images can be read."
+                    )
 
             # Normalize CRLF -> LF before line-splitting. Primarily a Windows
             # concern (git checkouts with autocrlf, editors saving CRLF) but
@@ -394,7 +433,8 @@ class ReadFileTool(_FsTool):
             result = "\n".join(numbered)
 
             if len(result) > self._MAX_CHARS:
-                trimmed, chars = [], 0
+                trimmed: list[str] = []
+                chars = 0
                 for line in numbered:
                     chars += len(line) + 1
                     if chars > self._MAX_CHARS:
@@ -767,22 +807,6 @@ def _best_window(old_text: str, content: str) -> tuple[float, int, list[str], li
     return best_ratio, best_start, best_window_lines, hints
 
 
-def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
-    """Locate old_text in content with a multi-level fallback chain:
-
-    1. Exact substring match
-    2. Line-trimmed sliding window (handles indentation differences)
-    3. Smart quote normalization (curly ↔ straight quotes)
-
-    Both inputs should use LF line endings (caller normalises CRLF).
-    Returns (matched_fragment, count) or (None, 0).
-    """
-    matches = _find_matches(content, old_text)
-    if not matches:
-        return None, 0
-    return matches[0].text, len(matches)
-
-
 @tool_parameters(
     tool_parameters_schema(
         path=StringSchema("The file path to edit"),
@@ -790,13 +814,11 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
         new_text=StringSchema("The text to replace with"),
         replace_all=BooleanSchema(description="Replace all occurrences (default false)"),
         occurrence=IntegerSchema(
-            1,
             description="Optional 1-based occurrence to replace when old_text appears multiple times.",
             minimum=1,
             nullable=True,
         ),
         line_hint=IntegerSchema(
-            1,
             description=(
                 "Optional exact 1-based target line copied from read_file. "
                 "The selected old_text match must cover this line."
@@ -805,7 +827,6 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
             nullable=True,
         ),
         expected_replacements=IntegerSchema(
-            1,
             description="Optional guard for the number of replacements that must be made.",
             minimum=1,
             nullable=True,
@@ -828,7 +849,8 @@ class EditFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Perform a small, exact replacement in one file by replacing "
-            "old_text with new_text. Use this for narrow text substitutions "
+            "old_text with new_text. When replacing text in an existing file, "
+            "old_text and new_text must be different. Use this for narrow text substitutions "
             "with old_text copied from read_file. For multi-file, structural, "
             "or generated code edits, prefer apply_patch. If old_text matches "
             "multiple times, provide more context or set occurrence, line_hint, "
@@ -863,9 +885,12 @@ class EditFileTool(_FsTool):
                 return ToolResult.error("Error: expected_replacements must be >= 1.")
 
             fp = self._resolve_write(path)
+            file_exists = fp.exists()
+            if file_exists and old_text == new_text:
+                return ToolResult.error("Error: new_text must be different from old_text.")
 
             # Create-file semantics: old_text='' + file doesn't exist → create
-            if not fp.exists():
+            if not file_exists:
                 if old_text == "":
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     fp.write_text(new_text, encoding="utf-8")
@@ -1036,7 +1061,6 @@ class EditFileTool(_FsTool):
         path=StringSchema("The directory path to list"),
         recursive=BooleanSchema(description="Recursively list all files (default false)"),
         max_entries=IntegerSchema(
-            200,
             description="Maximum entries to return (default 200)",
             minimum=1,
         ),

@@ -6,37 +6,11 @@ from zipfile import ZipFile
 import pytest
 
 from nanobot.utils.document import (
-    SUPPORTED_EXTENSIONS,
     PdfSafetyError,
     _is_text_extension,
     extract_pdf_pages,
     extract_text,
 )
-
-
-class TestSupportedExtensions:
-    """Test the SUPPORTED_EXTENSIONS constant."""
-
-    def test_supported_extensions_include_common_formats(self):
-        """Test that common document formats are included."""
-        # Document formats
-        assert ".pdf" in SUPPORTED_EXTENSIONS
-        assert ".docx" in SUPPORTED_EXTENSIONS
-        assert ".xlsx" in SUPPORTED_EXTENSIONS
-        assert ".pptx" in SUPPORTED_EXTENSIONS
-
-        # Text formats
-        assert ".txt" in SUPPORTED_EXTENSIONS
-        assert ".md" in SUPPORTED_EXTENSIONS
-        assert ".csv" in SUPPORTED_EXTENSIONS
-        assert ".json" in SUPPORTED_EXTENSIONS
-        assert ".yaml" in SUPPORTED_EXTENSIONS
-        assert ".yml" in SUPPORTED_EXTENSIONS
-
-        # Image formats
-        assert ".png" in SUPPORTED_EXTENSIONS
-        assert ".jpg" in SUPPORTED_EXTENSIONS
-        assert ".jpeg" in SUPPORTED_EXTENSIONS
 
 
 class TestExtractText:
@@ -66,6 +40,13 @@ class TestExtractText:
 
         result = extract_text(txt_file)
         assert result == content
+
+    def test_extract_text_accepts_string_path(self, tmp_path: Path):
+        """String paths retain the compatibility behavior of Path inputs."""
+        txt_file = tmp_path / "string-path.txt"
+        txt_file.write_text("string path", encoding="utf-8")
+
+        assert extract_text(str(txt_file)) == "string path"
 
     def test_extract_text_txt_file_with_truncation(self, tmp_path: Path):
         """Test that large text files are truncated."""
