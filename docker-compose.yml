@@ -39,11 +39,16 @@ services:
   nanobot-api:
     container_name: nanobot-api
     <<: *common-config
-    command:
-      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
+        NANOBOT_EXTRAS: api
+    command: ["serve", "--host", "0.0.0.0"]
     restart: unless-stopped
     ports:
-      - 127.0.0.1:8900:8900
+      - 8900:8900
     deploy:
       resources:
         limits:
