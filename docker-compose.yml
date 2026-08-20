@@ -21,7 +21,7 @@ x-common-config: &common-config
 services:
   nanobot-gateway:
     container_name: nanobot-gateway
-    image: registry.cn-shanghai.aliyuncs.com/nanobot/gateway:latest
+    image: registry.cn-shanghai.aliyuncs.com/xy_yyz/nanobot-gateway:latest
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
@@ -39,7 +39,7 @@ services:
 
   nanobot-api:
     container_name: nanobot-api
-    image: registry.cn-shanghai.aliyuncs.com/nanobot/api:latest
+    image: registry.cn-shanghai.aliyuncs.com/xy_yyz/nanobot-api:latest
     <<: *common-config
     build:
       context: .
@@ -62,7 +62,7 @@ services:
 
   nanobot-cli:
     # 同 gateway 镜像（构建参数一致），服务器上 pull 即可用，无需本地构建
-    image: registry.cn-shanghai.aliyuncs.com/nanobot/gateway:latest
+    image: registry.cn-shanghai.aliyuncs.com/xy_yyz/nanobot-gateway:latest
     <<: *common-config
     profiles:
       - cli
